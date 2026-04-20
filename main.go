@@ -25,6 +25,7 @@ import (
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/executor"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/heartbeat"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/migration"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 	wardenconnect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 )
@@ -58,6 +59,13 @@ func (h *wardenHandler) PurgeSiteCache(
 	req *connect.Request[wardenv1.PurgeSiteCacheRequest],
 ) (*connect.Response[wardenv1.PurgeSiteCacheResponse], error) {
 	return h.exec.HandlePurgeSiteCache(ctx, req)
+}
+
+func (h *wardenHandler) MigrateSite(
+	ctx context.Context,
+	req *connect.Request[wardenv1.MigrateSiteRequest],
+) (*connect.Response[wardenv1.MigrateSiteResponse], error) {
+	return h.exec.HandleMigrateSite(ctx, req)
 }
 
 func main() {
@@ -98,6 +106,9 @@ func main() {
 	// Register gRPC/Connect-Go handlers.
 	mux := http.NewServeMux()
 	mux.Handle(wardenconnect.NewWardenServiceHandler(&wardenHandler{exec: exec}))
+
+	// Register HTTP handler for inbound site migration file uploads.
+	mux.Handle("/migration/receive/", migration.ReceiveHandler(cfg.APIToken))
 
 	addr := ":" + cfg.GRPCPort
 	log.Printf("[warden] listening on %s (h2c)", addr)

@@ -19,6 +19,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/migration"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/nodejs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/wordpress"
@@ -28,19 +29,21 @@ import (
 
 // Executor wraps the provisioner and dispatches async jobs.
 type Executor struct {
-	prov   *provisioning.Provisioner
-	wpProv *wordpress.Provisioner
-	jsProv *nodejs.Provisioner
-	cfg    *config.Config
+	prov    *provisioning.Provisioner
+	wpProv  *wordpress.Provisioner
+	jsProv  *nodejs.Provisioner
+	migrate *migration.Migrator
+	cfg     *config.Config
 }
 
 // New creates an Executor ready to run jobs.
 func New(cfg *config.Config, _ wardenv1connect.WardenServiceClient) *Executor {
 	return &Executor{
-		prov:   provisioning.NewProvisioner(),
-		wpProv: wordpress.New(cfg),
-		jsProv: nodejs.New(cfg),
-		cfg:    cfg,
+		prov:    provisioning.NewProvisioner(),
+		wpProv:  wordpress.New(cfg),
+		jsProv:  nodejs.New(cfg),
+		migrate: migration.New(cfg),
+		cfg:     cfg,
 	}
 }
 
@@ -81,6 +84,28 @@ func (e *Executor) HandleDeprovisionSite(
 
 	return connect.NewResponse(&wardenv1.DeprovisionSiteResponse{
 		JobId:  r.GetJobId(),
+		Status: wardenv1.ProvisioningStatus_PROVISIONING_STATUS_RUNNING,
+	}), nil
+}
+
+// HandleMigrateSite accepts the gRPC request and fires the migration in a goroutine.
+func (e *Executor) HandleMigrateSite(
+	ctx context.Context,
+	req *connect.Request[wardenv1.MigrateSiteRequest],
+) (*connect.Response[wardenv1.MigrateSiteResponse], error) {
+	r := req.Msg
+	log.Printf("[executor] migrate_site job site=%s target=%s", r.GetSiteId(), r.GetTargetServerIp())
+
+	jobID := "migrate-" + r.GetSiteId()
+	go func() {
+		migCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		err := e.migrate.MigrateSite(migCtx, r)
+		e.reportResult(jobID, err)
+	}()
+
+	return connect.NewResponse(&wardenv1.MigrateSiteResponse{
+		JobId:  jobID,
 		Status: wardenv1.ProvisioningStatus_PROVISIONING_STATUS_RUNNING,
 	}), nil
 }
