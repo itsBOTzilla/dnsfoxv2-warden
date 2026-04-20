@@ -19,6 +19,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/nodejs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/wordpress"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
@@ -29,6 +30,7 @@ import (
 type Executor struct {
 	prov   *provisioning.Provisioner
 	wpProv *wordpress.Provisioner
+	jsProv *nodejs.Provisioner
 	cfg    *config.Config
 }
 
@@ -37,6 +39,7 @@ func New(cfg *config.Config, _ wardenv1connect.WardenServiceClient) *Executor {
 	return &Executor{
 		prov:   provisioning.NewProvisioner(),
 		wpProv: wordpress.New(cfg),
+		jsProv: nodejs.New(cfg),
 		cfg:    cfg,
 	}
 }
@@ -119,17 +122,28 @@ func (e *Executor) runProvision(jobID string, cfg provisioning.SiteConfig, siteT
 	case "wordpress":
 		params := parseWPParams(rawCreds)
 		err = e.wpProv.ProvisionWordPress(ctx, cfg, params)
+	case "nodejs":
+		params := parseNodeParams(rawCreds)
+		err = e.jsProv.ProvisionNodeJS(ctx, cfg, params)
 	}
+	// "php" — ProvisionSite() above is sufficient.
 	e.reportResult(jobID, err)
 }
 
 // runDeprovision tears down a site and reports the result.
+// Node.js sites are identified by the absence of a PHP-FPM pool config.
 func (e *Executor) runDeprovision(jobID, siteID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	phpVersion := detectPHPVersion(siteID)
-	err := e.prov.DeprovisionSite(ctx, siteID, phpVersion)
+	var err error
+	if phpVersion == "" {
+		// No PHP pool found — assume Node.js site.
+		err = e.jsProv.DeprovisionNodeJS(ctx, siteID)
+	} else {
+		err = e.prov.DeprovisionSite(ctx, siteID, phpVersion)
+	}
 	e.reportResult(jobID, err)
 }
 
@@ -169,8 +183,18 @@ func parseWPParams(raw []byte) wordpress.WPParams {
 	return p
 }
 
+// parseNodeParams decodes the encrypted_credentials bytes as a JSON NodeParams struct.
+// Returns safe defaults when the payload is absent or unparseable.
+func parseNodeParams(raw []byte) nodejs.NodeParams {
+	var p nodejs.NodeParams
+	if len(raw) > 0 {
+		json.Unmarshal(raw, &p) //nolint:errcheck — defaults used on decode failure
+	}
+	return p
+}
+
 // detectPHPVersion scans pool config locations to find which PHP version a site uses.
-// Returns "8.3" as a safe default when nothing is found.
+// Returns empty string when no pool config is found (indicates a non-PHP site).
 func detectPHPVersion(siteID string) string {
 	candidates := []struct {
 		version string
@@ -187,5 +211,5 @@ func detectPHPVersion(siteID string) string {
 			return c.version
 		}
 	}
-	return "8.3"
+	return ""
 }

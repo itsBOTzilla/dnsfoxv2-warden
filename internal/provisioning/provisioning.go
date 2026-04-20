@@ -157,15 +157,18 @@ func (p *Provisioner) DeprovisionSite(ctx context.Context, siteID, phpVersion st
 	return nil
 }
 
-// siteUsername converts a site ID to a safe Linux username.
+// SiteUsername converts a site ID to a safe Linux username.
 // Caps the ID at 15 chars so the total username stays at 20 chars max.
-func siteUsername(siteID string) string {
+func SiteUsername(siteID string) string {
 	id := siteID
 	if len(id) > 15 {
 		id = id[:15]
 	}
 	return "site_" + id
 }
+
+// siteUsername is the unexported alias used within this package.
+func siteUsername(siteID string) string { return SiteUsername(siteID) }
 
 // planMaxChildren maps plan to PHP-FPM pm.max_children.
 func planMaxChildren(plan string) int {
@@ -192,7 +195,12 @@ func phpServiceName(version string) string {
 	return fmt.Sprintf("php%s-fpm-dnsfox", version)
 }
 
-// createSystemUser creates a locked system user with no login shell.
+// CreateSystemUser creates a locked system user with no login shell.
+func CreateSystemUser(username string) error {
+	return createSystemUser(username)
+}
+
+// createSystemUser is the unexported implementation.
 func createSystemUser(username string) error {
 	cmd := exec.Command("useradd",
 		"--system",
@@ -210,7 +218,10 @@ func createSystemUser(username string) error {
 	return nil
 }
 
-// addToGroup adds a user to a supplementary group.
+// AddToGroup adds member to the specified supplementary group.
+func AddToGroup(group, member string) error { return addToGroup(group, member) }
+
+// addToGroup is the unexported implementation.
 func addToGroup(group, member string) error {
 	out, err := exec.Command("usermod", "-aG", group, member).CombinedOutput()
 	if err != nil {
@@ -219,7 +230,10 @@ func addToGroup(group, member string) error {
 	return nil
 }
 
-// createDocumentRoot creates the site directory tree with correct ownership.
+// CreateDocumentRoot creates the site directory tree with correct ownership.
+func CreateDocumentRoot(docroot, username string) error { return createDocumentRoot(docroot, username) }
+
+// createDocumentRoot is the unexported implementation.
 func createDocumentRoot(docroot, username string) error {
 	if err := exec.Command("mkdir", "-p", docroot).Run(); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
@@ -244,7 +258,10 @@ func reloadPHPFPM(phpVersion string) error {
 	return exec.Command("systemctl", "reload", phpServiceName(phpVersion)).Run()
 }
 
-// reloadNginx sends a reload signal to Nginx.
+// ReloadNginx sends a reload signal to Nginx.
+func ReloadNginx() error { return reloadNginx() }
+
+// reloadNginx is the unexported implementation.
 func reloadNginx() error {
 	return exec.Command("systemctl", "reload", "nginx").Run()
 }

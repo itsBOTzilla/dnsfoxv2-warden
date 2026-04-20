@@ -135,6 +135,98 @@ func (m *Manager) RemoveVhost(siteID string) error {
 	return nil
 }
 
+// ProxyVhostConfig holds the configuration for a Node.js reverse-proxy vhost.
+type ProxyVhostConfig struct {
+	SiteID string
+	Domain string
+	Port   int // localhost port the Node.js process listens on
+}
+
+const proxyVhostTemplate = `# DNSFox v2 — Node.js proxy vhost for {{.Domain}}
+# Do not edit manually — managed by Warden
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{.Domain}};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name {{.Domain}};
+
+    ssl_certificate     /etc/ssl/dnsfox/wildcard-sites/fullchain.pem;
+    ssl_certificate_key /etc/ssl/dnsfox/wildcard-sites/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    access_log /var/log/dnsfox/nginx-{{.SiteID}}-access.log;
+    error_log  /var/log/dnsfox/nginx-{{.SiteID}}-error.log;
+
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    location / {
+        proxy_pass http://127.0.0.1:{{.Port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+`
+
+// WriteProxyVhost writes an Nginx reverse-proxy vhost for a Node.js site.
+// Validates config with nginx -t before returning.
+func (m *Manager) WriteProxyVhost(cfg ProxyVhostConfig) error {
+	if err := os.MkdirAll("/var/log/dnsfox", 0755); err != nil {
+		return fmt.Errorf("create log dir: %w", err)
+	}
+
+	tmpl, err := template.New("proxy-vhost").Parse(proxyVhostTemplate)
+	if err != nil {
+		return fmt.Errorf("parse template: %w", err)
+	}
+
+	path := vhostPath(cfg.SiteID)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create conf.d-v2 dir: %w", err)
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create proxy vhost: %w", err)
+	}
+	defer f.Close()
+
+	if err := tmpl.Execute(f, cfg); err != nil {
+		return fmt.Errorf("render proxy vhost: %w", err)
+	}
+
+	if out, err := exec.Command("nginx", "-t").CombinedOutput(); err != nil {
+		return fmt.Errorf("nginx -t failed: %s: %w", out, err)
+	}
+	return nil
+}
+
 // PurgeCache removes cached responses for a site. url is optional; when empty
 // the entire per-site cache directory is wiped. Returns the number of files removed.
 // The nginx proxy_cache_path for v2 sites lives at /var/cache/nginx/v2-sites/{siteID}/.
