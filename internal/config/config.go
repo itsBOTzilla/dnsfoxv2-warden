@@ -25,6 +25,9 @@ type Config struct {
 	DocrootBase   string
 	LogDir        string
 	SitesDomain   string
+	// APIUrl is the base URL of the v2 control-plane API.
+	// The heartbeat loop sends metrics here and receives jobs.
+	APIUrl        string
 }
 
 // Load reads config from WARDEN_* environment variables and validates required fields.
@@ -45,6 +48,7 @@ func Load() (*Config, error) {
 		DocrootBase:   getEnv("WARDEN_DOCROOT_BASE", "/var/www"),
 		LogDir:        getEnv("WARDEN_LOG_DIR", "/var/log/dnsfox"),
 		SitesDomain:   getEnv("WARDEN_SITES_DOMAIN", "sites.dnsfox.com"),
+		APIUrl:        getEnv("WARDEN_API_URL", "http://127.0.0.1:5000"),
 	}
 
 	if cfg.ServerID == "" {
