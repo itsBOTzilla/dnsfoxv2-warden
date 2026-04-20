@@ -35,6 +35,9 @@ type Config struct {
 	// SMTPRelaySecret is used with HMAC-SHA256 to derive per-site SMTP passwords
 	// for the relay.dnsfox.com relay. Empty = SMTP not configured.
 	SMTPRelaySecret string
+	// PayloadEncryptionKey is the hex-encoded AES-256 key used to decrypt
+	// AgentJob.encrypted_payload fields delivered via heartbeat.
+	PayloadEncryptionKey string
 }
 
 // Load reads config from WARDEN_* environment variables and validates required fields.
@@ -57,8 +60,9 @@ func Load() (*Config, error) {
 		LogDir:          getEnv("WARDEN_LOG_DIR", "/var/log/dnsfox"),
 		SitesDomain:     getEnv("WARDEN_SITES_DOMAIN", "sites.dnsfox.com"),
 		APIUrl:          getEnv("WARDEN_API_URL", "http://127.0.0.1:5000"),
-		APIToken:        getEnv("WARDEN_API_TOKEN", ""),
-		SMTPRelaySecret: getEnv("WARDEN_SMTP_RELAY_SECRET", ""),
+		APIToken:             getEnv("WARDEN_API_TOKEN", ""),
+		SMTPRelaySecret:      getEnv("WARDEN_SMTP_RELAY_SECRET", ""),
+		PayloadEncryptionKey: getEnv("WARDEN_PAYLOAD_ENCRYPTION_KEY", ""),
 	}
 
 	if cfg.ServerID == "" {

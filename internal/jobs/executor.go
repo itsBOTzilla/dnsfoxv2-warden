@@ -1,14 +1,25 @@
+// Package jobs processes AgentJob messages delivered via the heartbeat response.
+// These are operational jobs that do not have dedicated gRPC RPCs:
+// SYNC_WAF_RULES, SYNC_MU_PLUGINS, RELOAD_NGINX, ISSUE_CERTIFICATE.
+// Provisioning jobs (PROVISION_*, DEPROVISION_*) arrive via direct gRPC calls
+// and are only listed here for fallback completeness.
+//
+// Concurrency is bounded by maxConcurrentJobs; duplicate job IDs are skipped.
+// Each job's encrypted_payload is decrypted with AES-256-GCM before dispatch.
 package jobs
 
 import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
 
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/nginx"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 )
 
@@ -16,18 +27,33 @@ const maxConcurrentJobs = 4
 
 // Executor processes agent jobs with concurrency control.
 type Executor struct {
-	encryptionKey []byte
+	cfg           *config.Config
+	encryptionKey []byte // AES-256; nil = no decryption attempted
+	nginx         *nginx.Manager
 	semaphore     chan struct{}
 	mu            sync.Mutex
 	activeJobs    map[string]bool
 }
 
-// NewExecutor creates a job executor with the given AES-256 key.
-func NewExecutor(encryptionKey []byte) *Executor {
+// NewExecutor creates a job executor. encryptionKey may be empty when the
+// WARDEN_PAYLOAD_ENCRYPTION_KEY env var is not set; jobs with encrypted payloads
+// will fail with a clear error in that case.
+func NewExecutor(cfg *config.Config) *Executor {
+	var key []byte
+	if cfg.PayloadEncryptionKey != "" {
+		b, err := hex.DecodeString(cfg.PayloadEncryptionKey)
+		if err == nil && len(b) == 32 {
+			key = b
+		} else {
+			log.Printf("[jobs] warn: WARDEN_PAYLOAD_ENCRYPTION_KEY is set but invalid — encrypted jobs will fail")
+		}
+	}
 	return &Executor{
-		encryptionKey: encryptionKey,
-		semaphore:     make(chan struct{}, maxConcurrentJobs),
-		activeJobs:    make(map[string]bool),
+		cfg:        cfg,
+		encryptionKey: key,
+		nginx:      nginx.NewManager(),
+		semaphore:  make(chan struct{}, maxConcurrentJobs),
+		activeJobs: make(map[string]bool),
 	}
 }
 
@@ -64,9 +90,9 @@ func (e *Executor) ProcessJobs(
 				e.mu.Unlock()
 			}()
 
-			log.Printf("executor: starting job %s type %s", j.JobId, j.Type)
+			log.Printf("[jobs] starting job %s type %s", j.JobId, j.Type)
 			status, errMsg := e.executeJob(ctx, j)
-			log.Printf("executor: job %s finished — status %s", j.JobId, status)
+			log.Printf("[jobs] job %s finished — status %s", j.JobId, status)
 
 			if onComplete != nil {
 				onComplete(j.JobId, status, errMsg)
@@ -75,13 +101,18 @@ func (e *Executor) ProcessJobs(
 	}
 }
 
+// executeJob decrypts the payload (if present) and dispatches to the correct handler.
 func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 	wardenv1.ProvisioningStatus, string,
 ) {
-	payload, err := e.decryptPayload(job.EncryptedPayload)
-	if err != nil {
-		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED,
-			fmt.Sprintf("decrypt payload: %v", err)
+	var payload map[string]interface{}
+	if len(job.EncryptedPayload) > 0 {
+		p, err := e.decryptPayload(job.EncryptedPayload)
+		if err != nil {
+			return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED,
+				fmt.Sprintf("decrypt payload: %v", err)
+		}
+		payload = p
 	}
 
 	switch job.Type {
@@ -98,8 +129,14 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 	case wardenv1.JobType_JOB_TYPE_PURGE_CACHE:
 		return e.handlePurgeCache(ctx, payload)
 
+	case wardenv1.JobType_JOB_TYPE_SYNC_WAF_RULES:
+		return e.handleSyncWafRules(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_SYNC_MU_PLUGINS:
+		return e.handleSyncMuPlugins(ctx, payload)
+
 	case wardenv1.JobType_JOB_TYPE_RELOAD_NGINX:
-		return e.handleReloadNginx(ctx, payload)
+		return e.handleReloadNginx(ctx)
 
 	case wardenv1.JobType_JOB_TYPE_ISSUE_CERTIFICATE:
 		return e.handleIssueCertificate(ctx, payload)
@@ -112,6 +149,9 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 
 // decryptPayload decrypts an AES-256-GCM encrypted job payload and unmarshals it.
 func (e *Executor) decryptPayload(encrypted []byte) (map[string]interface{}, error) {
+	if len(e.encryptionKey) == 0 {
+		return nil, fmt.Errorf("no payload encryption key configured")
+	}
 	block, err := aes.NewCipher(e.encryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
@@ -139,53 +179,4 @@ func (e *Executor) decryptPayload(encrypted []byte) (map[string]interface{}, err
 	}
 
 	return payload, nil
-}
-
-func (e *Executor) handleProvisionSite(_ context.Context, _ map[string]interface{}) (
-	wardenv1.ProvisioningStatus, string,
-) {
-	// TODO: extract SiteConfig from payload, call provisioning.ProvisionSite
-	log.Println("executor: TODO implement provision site")
-	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
-}
-
-func (e *Executor) handleProvisionNodeJS(_ context.Context, _ map[string]interface{}) (
-	wardenv1.ProvisioningStatus, string,
-) {
-	// TODO: implement Node.js provisioning
-	log.Println("executor: TODO implement provision nodejs")
-	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
-}
-
-func (e *Executor) handleDeprovisionSite(_ context.Context, payload map[string]interface{}) (
-	wardenv1.ProvisioningStatus, string,
-) {
-	// TODO: extract site_id from payload, call provisioning.DeprovisionSite
-	_ = payload
-	log.Println("executor: TODO implement deprovision site")
-	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
-}
-
-func (e *Executor) handlePurgeCache(_ context.Context, _ map[string]interface{}) (
-	wardenv1.ProvisioningStatus, string,
-) {
-	// TODO: rm -rf /var/cache/nginx/sites/{site_id}/*
-	log.Println("executor: TODO implement purge cache")
-	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
-}
-
-func (e *Executor) handleReloadNginx(_ context.Context, _ map[string]interface{}) (
-	wardenv1.ProvisioningStatus, string,
-) {
-	// TODO: exec.Command("systemctl", "reload", "nginx")
-	log.Println("executor: TODO implement reload nginx")
-	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
-}
-
-func (e *Executor) handleIssueCertificate(_ context.Context, _ map[string]interface{}) (
-	wardenv1.ProvisioningStatus, string,
-) {
-	// TODO: exec.Command("certbot", "--nginx", "-d", domain, "--non-interactive", "--agree-tos")
-	log.Println("executor: TODO implement issue certificate")
-	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
 }
