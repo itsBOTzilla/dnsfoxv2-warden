@@ -11,4 +11,4 @@ require (
 
 require golang.org/x/text v0.36.0 // indirect
 
-replace github.com/itsBOTzilla/dnsfoxv2-proto => ../proto
+replace github.com/itsBOTzilla/dnsfoxv2-proto => ../dnsfoxv2-proto
