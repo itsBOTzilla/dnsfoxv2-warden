@@ -1,9 +1,9 @@
 // main.go — DNSFox v2 Warden Agent entry point.
 //
 // The warden runs two concurrent loops:
-//   1. gRPC/Connect-Go server — receives provisioning jobs from the API
-//   2. Heartbeat loop — pushes system metrics to the API every 15s and
-//      receives pending jobs + config-sync directives in the response
+//  1. gRPC/Connect-Go server — receives provisioning jobs from the API
+//  2. Heartbeat loop — pushes system metrics to the API every 15s and
+//     receives pending jobs + config-sync directives in the response
 //
 // Both loops honour context cancellation so SIGTERM shuts everything down
 // cleanly. Config is read entirely from environment variables (see
@@ -23,17 +23,42 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/executor"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/heartbeat"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 	wardenconnect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 )
 
 // wardenHandler implements the WardenService gRPC interface.
-// Individual RPCs will be wired to real handlers in later steps.
-type wardenHandler struct{ wardenconnect.UnimplementedWardenServiceHandler }
+// It embeds UnimplementedWardenServiceHandler for any RPCs not yet wired.
+type wardenHandler struct {
+	wardenconnect.UnimplementedWardenServiceHandler
+	exec *executor.Executor
+}
 
 // keep connect referenced to prevent mod tidy from dropping the import.
 var _ = connect.CodeUnimplemented
+
+func (h *wardenHandler) ProvisionSite(
+	ctx context.Context,
+	req *connect.Request[wardenv1.ProvisionSiteRequest],
+) (*connect.Response[wardenv1.ProvisionSiteResponse], error) {
+	return h.exec.HandleProvisionSite(ctx, req)
+}
+
+func (h *wardenHandler) DeprovisionSite(
+	ctx context.Context,
+	req *connect.Request[wardenv1.DeprovisionSiteRequest],
+) (*connect.Response[wardenv1.DeprovisionSiteResponse], error) {
+	return h.exec.HandleDeprovisionSite(ctx, req)
+}
+
+func (h *wardenHandler) PurgeSiteCache(
+	ctx context.Context,
+	req *connect.Request[wardenv1.PurgeSiteCacheRequest],
+) (*connect.Response[wardenv1.PurgeSiteCacheResponse], error) {
+	return h.exec.HandlePurgeSiteCache(ctx, req)
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -57,9 +82,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Build the Connect-Go client used by the heartbeat to call the v2 API.
-	// When the API is not yet running (early bootstrap), sends will fail and
-	// be logged without crashing the process.
+	// Build the Connect-Go client used by the heartbeat and job result reporting.
 	apiClient := wardenconnect.NewWardenServiceClient(
 		&http.Client{},
 		cfg.APIUrl,
@@ -69,15 +92,16 @@ func main() {
 	reporter := heartbeat.NewReporter(apiClient, cfg, onSync, onJobs)
 	go reporter.Run(ctx)
 
+	// Build executor and wire into gRPC handlers.
+	exec := executor.New(cfg, apiClient)
+
 	// Register gRPC/Connect-Go handlers.
 	mux := http.NewServeMux()
-	mux.Handle(wardenconnect.NewWardenServiceHandler(&wardenHandler{}))
+	mux.Handle(wardenconnect.NewWardenServiceHandler(&wardenHandler{exec: exec}))
 
 	addr := ":" + cfg.GRPCPort
 	log.Printf("[warden] listening on %s (h2c)", addr)
 
-	// Serve until context is cancelled, then return from ListenAndServe.
-	// We use a goroutine so the shutdown signal is not missed.
 	go func() {
 		<-ctx.Done()
 		log.Printf("[warden] shutting down")
@@ -89,15 +113,13 @@ func main() {
 }
 
 // onSync handles a ConfigSyncDirective from the heartbeat response.
-// In later steps this will trigger WAF rule updates, MU plugin syncs, etc.
 func onSync(sync *wardenv1.ConfigSyncDirective) {
 	log.Printf("[warden] config sync received (latest_version=%s)", sync.GetLatestWardenVersion())
 }
 
-// onJobs handles pending jobs delivered via the heartbeat response.
-// In Step 2 these will be dispatched to the job executor.
+// onJobs logs heartbeat-delivered jobs. Full dispatch is handled by direct gRPC calls.
 func onJobs(jobs []*wardenv1.AgentJob) {
 	for _, j := range jobs {
-		log.Printf("[warden] job received: id=%s type=%s", j.GetJobId(), j.GetType())
+		log.Printf("[warden] heartbeat job: id=%s type=%s", j.GetJobId(), j.GetType())
 	}
 }

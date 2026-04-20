@@ -134,3 +134,24 @@ func (m *Manager) RemoveVhost(siteID string) error {
 	}
 	return nil
 }
+
+// PurgeCache removes cached responses for a site. url is optional; when empty
+// the entire per-site cache directory is wiped. Returns the number of files removed.
+// The nginx proxy_cache_path for v2 sites lives at /var/cache/nginx/v2-sites/{siteID}/.
+func (m *Manager) PurgeCache(siteID, url string) (int32, error) {
+	cacheDir := filepath.Join("/var/cache/nginx/v2-sites", siteID)
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read cache dir: %w", err)
+	}
+	var count int32
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(cacheDir, e.Name())); err == nil {
+			count++
+		}
+	}
+	return count, nil
+}
