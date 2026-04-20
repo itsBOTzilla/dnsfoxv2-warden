@@ -140,6 +140,59 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 	return nil
 }
 
+// SwitchPHPVersion migrates a site from one PHP version to another without
+// touching MariaDB, cgroups, nginx vhost, or the docroot.
+// The socket path (/run/php/{username}.sock) is version-agnostic so nginx
+// needs no changes — only the PHP-FPM pool config changes.
+//
+// Steps:
+//  1. Write pool config for the new version
+//  2. Reload new PHP-FPM service (starts managing the pool)
+//  3. Wait for the socket to be ready
+//  4. Remove pool config from the old version
+//  5. Reload old PHP-FPM (stops managing the pool gracefully)
+//  6. Re-assign PHP-FPM workers to the cgroup slice
+func (p *Provisioner) SwitchPHPVersion(ctx context.Context, siteID, fromVersion, toVersion string) error {
+	log.Printf("[provisioning] switch php %s → %s for site %s", fromVersion, toVersion, siteID)
+	username := siteUsername(siteID)
+
+	pool := phpfpm.PoolConfig{
+		SiteID:     siteID,
+		Username:   username,
+		PHPVersion: toVersion,
+		MaxChildren: planMaxChildren("fox"), // will be re-applied by cgroups; use conservative default
+	}
+	if err := phpfpm.WritePoolConfig(pool); err != nil {
+		return fmt.Errorf("write pool config for %s: %w", toVersion, err)
+	}
+	if err := reloadPHPFPM(toVersion); err != nil {
+		return fmt.Errorf("reload php%s-fpm: %w", toVersion, err)
+	}
+
+	socketPath := fmt.Sprintf("/run/php/%s.sock", username)
+	if err := waitForSocket(socketPath, 20); err != nil {
+		return fmt.Errorf("socket not ready after switching to php%s: %w", toVersion, err)
+	}
+
+	// Remove old pool config and reload to cleanly stop old FPM workers.
+	if err := phpfpm.RemovePoolConfig(siteID); err != nil {
+		log.Printf("[provisioning] warn: remove old pool config: %v", err)
+	}
+	// Re-write the new config (RemovePoolConfig removed all versions).
+	if err := phpfpm.WritePoolConfig(pool); err != nil {
+		return fmt.Errorf("re-write pool config for %s: %w", toVersion, err)
+	}
+	reloadPHPFPM(fromVersion) //nolint:errcheck — gracefully stop old workers
+
+	// Re-assign PHP-FPM workers to the cgroup slice.
+	if err := p.Cgroups.AssignWorkers(siteID, username); err != nil {
+		log.Printf("[provisioning] warn: reassign cgroup workers after php switch: %v", err)
+	}
+
+	log.Printf("[provisioning] php switch complete: site %s now on php%s", siteID, toVersion)
+	return nil
+}
+
 // DeprovisionSite removes all resources for a site cleanly.
 func (p *Provisioner) DeprovisionSite(ctx context.Context, siteID, phpVersion string) error {
 	log.Printf("deprovisioning site %s", siteID)

@@ -106,27 +106,42 @@ func (e *Executor) HandlePurgeSiteCache(
 }
 
 // runProvision runs the full site provisioning chain and reports the result.
-// For "wordpress" sites it runs base provisioning then the WordPress installer.
-// For "php" sites it runs base provisioning only.
+// When the site already has a PHP pool at a different version, it performs a
+// version switch instead of a full provision. For "nodejs" sites it bypasses
+// the PHP-FPM-based ProvisionSite entirely.
 func (e *Executor) runProvision(jobID string, cfg provisioning.SiteConfig, siteType string, rawCreds []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
+	if siteType == "nodejs" {
+		params := parseNodeParams(rawCreds)
+		err := e.jsProv.ProvisionNodeJS(ctx, cfg, params)
+		e.reportResult(jobID, err)
+		return
+	}
+
+	// PHP / WordPress path: check if site already exists (version switch vs fresh provision).
+	currentVersion := detectPHPVersion(cfg.SiteID)
+	if currentVersion != "" && currentVersion != cfg.PHPVersion && cfg.PHPVersion != "" {
+		// Site exists at a different PHP version — perform in-place switch.
+		log.Printf("[executor] php version switch: site=%s %s → %s", cfg.SiteID, currentVersion, cfg.PHPVersion)
+		err := e.prov.SwitchPHPVersion(ctx, cfg.SiteID, currentVersion, cfg.PHPVersion)
+		e.reportResult(jobID, err)
+		return
+	}
+
+	// Fresh provision.
 	if err := e.prov.ProvisionSite(ctx, cfg); err != nil {
 		e.reportResult(jobID, err)
 		return
 	}
 
 	var err error
-	switch siteType {
-	case "wordpress":
+	if siteType == "wordpress" {
 		params := parseWPParams(rawCreds)
 		err = e.wpProv.ProvisionWordPress(ctx, cfg, params)
-	case "nodejs":
-		params := parseNodeParams(rawCreds)
-		err = e.jsProv.ProvisionNodeJS(ctx, cfg, params)
 	}
-	// "php" — ProvisionSite() above is sufficient.
+	// "php" — ProvisionSite() is sufficient.
 	e.reportResult(jobID, err)
 }
 
