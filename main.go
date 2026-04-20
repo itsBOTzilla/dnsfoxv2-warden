@@ -31,6 +31,7 @@ import (
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/jobs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/metrics"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/migration"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/siteusage"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 	wardenconnect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 )
@@ -198,6 +199,14 @@ func main() {
 		onJobs(j, jobExec, tracker)
 	})
 	go reporter.Run(ctx)
+
+	// Start per-site resource usage reporting loop in background.
+	docrootBase := cfg.DocrootBase
+	if docrootBase == "" {
+		docrootBase = "/var/www"
+	}
+	usageReporter := siteusage.NewReporter(apiClient, docrootBase)
+	go usageReporter.Run(ctx)
 
 	// Register gRPC/Connect-Go handlers.
 	mux := http.NewServeMux()
