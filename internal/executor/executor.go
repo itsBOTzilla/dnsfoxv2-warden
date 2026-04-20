@@ -1,10 +1,16 @@
 // Package executor dispatches provisioning jobs to the real provisioner.
 // Each job runs in a goroutine so the gRPC call returns immediately with
 // RUNNING status; the result is reported back via ReportJobResult.
+//
+// Site-type routing:
+//   - "wordpress" → ProvisionSite() then wordpress.ProvisionWordPress()
+//   - "php"       → ProvisionSite() only
+//   - "nodejs"    → nodejs.ProvisionNodeJS() (no PHP-FPM, no MariaDB by default)
 package executor
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -14,44 +20,45 @@ import (
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/wordpress"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 	wardenv1connect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 )
 
 // Executor wraps the provisioner and dispatches async jobs.
 type Executor struct {
-	prov      *provisioning.Provisioner
-	apiClient wardenv1connect.WardenServiceClient
-	cfg       *config.Config
+	prov   *provisioning.Provisioner
+	wpProv *wordpress.Provisioner
+	cfg    *config.Config
 }
 
 // New creates an Executor ready to run jobs.
-func New(cfg *config.Config, apiClient wardenv1connect.WardenServiceClient) *Executor {
+func New(cfg *config.Config, _ wardenv1connect.WardenServiceClient) *Executor {
 	return &Executor{
-		prov:      provisioning.NewProvisioner(),
-		apiClient: apiClient,
-		cfg:       cfg,
+		prov:   provisioning.NewProvisioner(),
+		wpProv: wordpress.New(cfg),
+		cfg:    cfg,
 	}
 }
 
 // HandleProvisionSite accepts the gRPC request, fires provisioning in a
-// goroutine, and returns RUNNING immediately. The goroutine reports the
-// final result back to the API via ReportJobResult.
+// goroutine, and returns RUNNING immediately.
 func (e *Executor) HandleProvisionSite(
 	ctx context.Context,
 	req *connect.Request[wardenv1.ProvisionSiteRequest],
 ) (*connect.Response[wardenv1.ProvisionSiteResponse], error) {
 	r := req.Msg
-	log.Printf("[executor] provision_site job=%s site=%s domain=%s plan=%s php=%s",
-		r.GetJobId(), r.GetSiteId(), r.GetDomain(), r.GetPlan(), r.GetPhpVersion())
+	log.Printf("[executor] provision_site job=%s site=%s domain=%s type=%s plan=%s php=%s",
+		r.GetJobId(), r.GetSiteId(), r.GetDomain(), r.GetType(), r.GetPlan(), r.GetPhpVersion())
 
-	go e.runProvision(r.GetJobId(), provisioning.SiteConfig{
+	siteCfg := provisioning.SiteConfig{
 		SiteID:     r.GetSiteId(),
 		Domain:     r.GetDomain(),
 		CustomerID: r.GetCustomerId(),
 		PHPVersion: r.GetPhpVersion(),
 		Plan:       r.GetPlan(),
-	})
+	}
+	go e.runProvision(r.GetJobId(), siteCfg, r.GetType(), r.GetEncryptedCredentials())
 
 	return connect.NewResponse(&wardenv1.ProvisionSiteResponse{
 		JobId:  r.GetJobId(),
@@ -59,8 +66,7 @@ func (e *Executor) HandleProvisionSite(
 	}), nil
 }
 
-// HandleDeprovisionSite accepts the gRPC request, fires deprovisioning in a
-// goroutine, and returns RUNNING immediately.
+// HandleDeprovisionSite accepts the gRPC request, fires deprovisioning in a goroutine.
 func (e *Executor) HandleDeprovisionSite(
 	ctx context.Context,
 	req *connect.Request[wardenv1.DeprovisionSiteRequest],
@@ -96,12 +102,24 @@ func (e *Executor) HandlePurgeSiteCache(
 	}), nil
 }
 
-// runProvision runs the full site provisioning and reports the result.
-func (e *Executor) runProvision(jobID string, cfg provisioning.SiteConfig) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+// runProvision runs the full site provisioning chain and reports the result.
+// For "wordpress" sites it runs base provisioning then the WordPress installer.
+// For "php" sites it runs base provisioning only.
+func (e *Executor) runProvision(jobID string, cfg provisioning.SiteConfig, siteType string, rawCreds []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	err := e.prov.ProvisionSite(ctx, cfg)
+	if err := e.prov.ProvisionSite(ctx, cfg); err != nil {
+		e.reportResult(jobID, err)
+		return
+	}
+
+	var err error
+	switch siteType {
+	case "wordpress":
+		params := parseWPParams(rawCreds)
+		err = e.wpProv.ProvisionWordPress(ctx, cfg, params)
+	}
 	e.reportResult(jobID, err)
 }
 
@@ -110,14 +128,12 @@ func (e *Executor) runDeprovision(jobID, siteID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// PHPVersion is not tracked by the gRPC call — derive from installed pool files.
 	phpVersion := detectPHPVersion(siteID)
 	err := e.prov.DeprovisionSite(ctx, siteID, phpVersion)
 	e.reportResult(jobID, err)
 }
 
 // reportResult sends the final job status back to the v2 API.
-// Failures are logged but do not panic — the agent must keep running.
 func (e *Executor) reportResult(jobID string, jobErr error) {
 	status := wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE
 	errMsg := ""
@@ -141,6 +157,16 @@ func (e *Executor) reportResult(jobID string, jobErr error) {
 	if err != nil {
 		log.Printf("[executor] reportResult job=%s failed: %v", jobID, err)
 	}
+}
+
+// parseWPParams decodes the encrypted_credentials bytes as a JSON WPParams struct.
+// Returns safe defaults when the payload is absent or unparseable.
+func parseWPParams(raw []byte) wordpress.WPParams {
+	var p wordpress.WPParams
+	if len(raw) > 0 {
+		json.Unmarshal(raw, &p) //nolint:errcheck — defaults used on decode failure
+	}
+	return p
 }
 
 // detectPHPVersion scans pool config locations to find which PHP version a site uses.

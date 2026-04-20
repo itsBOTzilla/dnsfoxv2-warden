@@ -18,6 +18,7 @@ type Config struct {
 	MariaDBRootPw string
 	RedisHost     string
 	RedisPort     string
+	RedisPassword string
 	NginxVhostDir string
 	WildcardCert  string
 	WildcardKey   string
@@ -27,28 +28,37 @@ type Config struct {
 	SitesDomain   string
 	// APIUrl is the base URL of the v2 control-plane API.
 	// The heartbeat loop sends metrics here and receives jobs.
-	APIUrl        string
+	APIUrl string
+	// APIToken authenticates requests to the v2 control-plane API
+	// (mu-plugin downloads, job result reports, etc.).
+	APIToken string
+	// SMTPRelaySecret is used with HMAC-SHA256 to derive per-site SMTP passwords
+	// for the relay.dnsfox.com relay. Empty = SMTP not configured.
+	SMTPRelaySecret string
 }
 
 // Load reads config from WARDEN_* environment variables and validates required fields.
 func Load() (*Config, error) {
 	cfg := &Config{
-		ServerID:      getEnv("WARDEN_SERVER_ID", ""),
-		GRPCPort:      getEnv("WARDEN_GRPC_PORT", "9201"),
-		Environment:   getEnv("WARDEN_ENVIRONMENT", "production"),
-		MariaDBHost:   getEnv("WARDEN_MARIADB_HOST", "127.0.0.1"),
-		MariaDBPort:   getEnv("WARDEN_MARIADB_PORT", "3307"),
-		MariaDBRootPw: getEnv("MARIADB_ROOT_PASSWORD", ""),
-		RedisHost:     getEnv("WARDEN_REDIS_HOST", "127.0.0.1"),
-		RedisPort:     getEnv("WARDEN_REDIS_PORT", "6380"),
-		NginxVhostDir: getEnv("WARDEN_NGINX_VHOST_DIR", "/etc/nginx/conf.d-v2"),
-		WildcardCert:  getEnv("WARDEN_WILDCARD_CERT", "/etc/ssl/dnsfox/wildcard-sites/fullchain.pem"),
-		WildcardKey:   getEnv("WARDEN_WILDCARD_KEY", "/etc/ssl/dnsfox/wildcard-sites/privkey.pem"),
-		CgroupSlice:   getEnv("WARDEN_CGROUP_SLICE", "dnsfox-sites.slice"),
-		DocrootBase:   getEnv("WARDEN_DOCROOT_BASE", "/var/www"),
-		LogDir:        getEnv("WARDEN_LOG_DIR", "/var/log/dnsfox"),
-		SitesDomain:   getEnv("WARDEN_SITES_DOMAIN", "sites.dnsfox.com"),
-		APIUrl:        getEnv("WARDEN_API_URL", "http://127.0.0.1:5000"),
+		ServerID:        getEnv("WARDEN_SERVER_ID", ""),
+		GRPCPort:        getEnv("WARDEN_GRPC_PORT", "9201"),
+		Environment:     getEnv("WARDEN_ENVIRONMENT", "production"),
+		MariaDBHost:     getEnv("WARDEN_MARIADB_HOST", "127.0.0.1"),
+		MariaDBPort:     getEnv("WARDEN_MARIADB_PORT", "3307"),
+		MariaDBRootPw:   getEnv("MARIADB_ROOT_PASSWORD", ""),
+		RedisHost:       getEnv("WARDEN_REDIS_HOST", "127.0.0.1"),
+		RedisPort:       getEnv("WARDEN_REDIS_PORT", "6380"),
+		RedisPassword:   getEnv("WARDEN_REDIS_PASSWORD", ""),
+		NginxVhostDir:   getEnv("WARDEN_NGINX_VHOST_DIR", "/etc/nginx/conf.d-v2"),
+		WildcardCert:    getEnv("WARDEN_WILDCARD_CERT", "/etc/ssl/dnsfox/wildcard-sites/fullchain.pem"),
+		WildcardKey:     getEnv("WARDEN_WILDCARD_KEY", "/etc/ssl/dnsfox/wildcard-sites/privkey.pem"),
+		CgroupSlice:     getEnv("WARDEN_CGROUP_SLICE", "dnsfox-sites.slice"),
+		DocrootBase:     getEnv("WARDEN_DOCROOT_BASE", "/var/www"),
+		LogDir:          getEnv("WARDEN_LOG_DIR", "/var/log/dnsfox"),
+		SitesDomain:     getEnv("WARDEN_SITES_DOMAIN", "sites.dnsfox.com"),
+		APIUrl:          getEnv("WARDEN_API_URL", "http://127.0.0.1:5000"),
+		APIToken:        getEnv("WARDEN_API_TOKEN", ""),
+		SMTPRelaySecret: getEnv("WARDEN_SMTP_RELAY_SECRET", ""),
 	}
 
 	if cfg.ServerID == "" {
