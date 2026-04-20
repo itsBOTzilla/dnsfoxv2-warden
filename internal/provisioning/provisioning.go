@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"time"
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/cgroups"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/mariadb"
@@ -14,12 +16,11 @@ import (
 
 // SiteConfig holds everything needed to provision a site.
 type SiteConfig struct {
-	SiteID       string
-	Domain       string
-	CustomerID   string
-	PHPVersion   string // e.g. "8.3"
-	Plan         string // fox, swift, apex, titan
-	DocumentRoot string // e.g. /var/www/site_abc123/public
+	SiteID     string
+	Domain     string
+	CustomerID string
+	PHPVersion string // e.g. "8.3"
+	Plan       string // fox, swift, apex, titan
 }
 
 // PlanLimits maps plan names to cgroup resource limits.
@@ -47,24 +48,29 @@ func NewProvisioner() *Provisioner {
 }
 
 // ProvisionSite creates a fully isolated hosting environment for a site.
-// Steps: user → dirs → phpfpm pool → nginx vhost → cgroups → mariadb → reload
+// DNS record insertion is handled by the API caller after this returns — the warden
+// has no DB access on edge nodes. The API inserts into dns_records for the dnsfox.com zone.
 func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 	log.Printf("provisioning site %s domain %s plan %s", cfg.SiteID, cfg.Domain, cfg.Plan)
 
 	username := siteUsername(cfg.SiteID)
-	cfg.DocumentRoot = fmt.Sprintf("/var/www/%s/public", username)
+	docroot := fmt.Sprintf("/var/www/%s/public", username)
 
 	// Step 1: create Linux system user
 	if err := createSystemUser(username); err != nil {
 		return fmt.Errorf("create user: %w", err)
 	}
+	// nginx worker runs as www-data; add it to the site group so it can read the docroot (mode 750).
+	if err := addToGroup(username, "www-data"); err != nil {
+		return fmt.Errorf("add www-data to group: %w", err)
+	}
 	log.Printf("created user %s", username)
 
 	// Step 2: create document root
-	if err := createDocumentRoot(cfg.DocumentRoot, username); err != nil {
+	if err := createDocumentRoot(docroot, username); err != nil {
 		return fmt.Errorf("create docroot: %w", err)
 	}
-	log.Printf("created docroot %s", cfg.DocumentRoot)
+	log.Printf("created docroot %s", docroot)
 
 	// Step 3: write PHP-FPM pool config
 	pool := phpfpm.PoolConfig{
@@ -78,12 +84,12 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 	}
 	log.Printf("wrote php-fpm pool for %s", cfg.SiteID)
 
-	// Step 4: write Nginx vhost config
+	// Step 4: write Nginx vhost config (includes nginx -t validation)
 	vhost := nginx.VhostConfig{
 		SiteID:       cfg.SiteID,
 		Domain:       cfg.Domain,
 		Username:     username,
-		DocumentRoot: cfg.DocumentRoot,
+		DocumentRoot: docroot,
 		PHPVersion:   cfg.PHPVersion,
 	}
 	if err := p.Nginx.WriteVhost(vhost); err != nil {
@@ -91,7 +97,7 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 	}
 	log.Printf("wrote nginx vhost for %s", cfg.Domain)
 
-	// Step 5: apply cgroup v2 resource limits
+	// Step 5: apply cgroup v2 resource limits via systemd slice
 	limits, ok := PlanLimits[cfg.Plan]
 	if !ok {
 		limits = PlanLimits["fox"]
@@ -107,10 +113,24 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 	}
 	log.Printf("created mariadb database for %s", cfg.SiteID)
 
-	// Step 7: reload PHP-FPM and Nginx
+	// Step 7: reload PHP-FPM
 	if err := reloadPHPFPM(cfg.PHPVersion); err != nil {
 		return fmt.Errorf("reload phpfpm: %w", err)
 	}
+	// Wait for the PHP-FPM socket to appear before reloading nginx and assigning cgroups.
+	socketPath := fmt.Sprintf("/run/php/%s.sock", username)
+	if err := waitForSocket(socketPath, 20); err != nil {
+		return fmt.Errorf("phpfpm socket not ready: %w", err)
+	}
+	log.Printf("php-fpm socket ready at %s", socketPath)
+
+	// Step 8: assign PHP-FPM workers to site's cgroup slice
+	if err := p.Cgroups.AssignWorkers(cfg.SiteID, username); err != nil {
+		// Non-fatal: ondemand pools may have no workers until first request.
+		log.Printf("warn: assign cgroup workers for %s: %v", cfg.SiteID, err)
+	}
+
+	// Step 9: reload Nginx
 	if err := reloadNginx(); err != nil {
 		return fmt.Errorf("reload nginx: %w", err)
 	}
@@ -121,14 +141,13 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 }
 
 // DeprovisionSite removes all resources for a site cleanly.
-func (p *Provisioner) DeprovisionSite(ctx context.Context, siteID string) error {
+func (p *Provisioner) DeprovisionSite(ctx context.Context, siteID, phpVersion string) error {
 	log.Printf("deprovisioning site %s", siteID)
 	username := siteUsername(siteID)
 
-	// Order matters: stop processes first, then remove configs, then user
 	_ = phpfpm.RemovePoolConfig(siteID)
 	_ = p.Nginx.RemoveVhost(siteID)
-	_ = reloadPHPFPM("8.3")
+	_ = reloadPHPFPM(phpVersion)
 	_ = reloadNginx()
 	_ = p.Cgroups.RemoveLimits(siteID)
 	_ = p.MariaDB.DropSiteDatabase(siteID, username)
@@ -164,6 +183,15 @@ func planMaxChildren(plan string) int {
 	}
 }
 
+// phpServiceName returns the systemd service name for a given PHP version.
+// PHP 8.4 is installed via apt; all others are compiled from source.
+func phpServiceName(version string) string {
+	if version == "8.4" {
+		return "php8.4-fpm"
+	}
+	return fmt.Sprintf("php%s-fpm-dnsfox", version)
+}
+
 // createSystemUser creates a locked system user with no login shell.
 func createSystemUser(username string) error {
 	cmd := exec.Command("useradd",
@@ -174,45 +202,60 @@ func createSystemUser(username string) error {
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// Exit code 9 means user already exists — treat as success
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 9 {
-			return nil
+			return nil // user already exists
 		}
 		return fmt.Errorf("useradd failed: %s: %w", out, err)
 	}
 	return nil
 }
 
+// addToGroup adds a user to a supplementary group.
+func addToGroup(group, member string) error {
+	out, err := exec.Command("usermod", "-aG", group, member).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("usermod -aG %s %s: %s: %w", group, member, out, err)
+	}
+	return nil
+}
+
 // createDocumentRoot creates the site directory tree with correct ownership.
 func createDocumentRoot(docroot, username string) error {
-	// Create parent and public subdirectory
 	if err := exec.Command("mkdir", "-p", docroot).Run(); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
-	// Chown the whole site root (/var/www/<username>) to the site user
 	siteRoot := fmt.Sprintf("/var/www/%s", username)
 	if err := exec.Command("chown", "-R", username+":"+username, siteRoot).Run(); err != nil {
 		return fmt.Errorf("chown: %w", err)
 	}
-	// Owner rwx, group rx, other none
-	if err := exec.Command("chmod", "750", docroot).Run(); err != nil {
+	if err := exec.Command("chmod", "750", siteRoot).Run(); err != nil {
 		return fmt.Errorf("chmod: %w", err)
 	}
 	return nil
 }
 
-// removeSystemUser deletes the system user and their home directory.
+// removeSystemUser deletes the system user.
 func removeSystemUser(username string) error {
 	return exec.Command("userdel", "-r", username).Run()
 }
 
 // reloadPHPFPM sends a reload signal to the PHP-FPM service for a given version.
 func reloadPHPFPM(phpVersion string) error {
-	service := fmt.Sprintf("php%s-fpm", phpVersion)
-	return exec.Command("systemctl", "reload", service).Run()
+	return exec.Command("systemctl", "reload", phpServiceName(phpVersion)).Run()
 }
 
 // reloadNginx sends a reload signal to Nginx.
 func reloadNginx() error {
 	return exec.Command("systemctl", "reload", "nginx").Run()
+}
+
+// waitForSocket polls for a Unix socket to appear, up to maxAttempts × 250ms.
+func waitForSocket(path string, maxAttempts int) error {
+	for i := 0; i < maxAttempts; i++ {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("socket %s not ready after %d attempts (%dms)", path, maxAttempts, maxAttempts*250)
 }

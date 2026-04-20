@@ -3,6 +3,7 @@ package phpfpm
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"text/template"
 )
@@ -16,7 +17,7 @@ type PoolConfig struct {
 }
 
 // poolConfigTemplate is the PHP-FPM pool config template.
-// Each site gets its own isolated pool running as its Linux user.
+// Uses ; comments only — # comments with parentheses break parse_ini_file.
 const poolConfigTemplate = `; DNSFox v2 — auto-generated pool for site {{.SiteID}}
 ; Do not edit manually — managed by Warden
 
@@ -24,47 +25,49 @@ const poolConfigTemplate = `; DNSFox v2 — auto-generated pool for site {{.Site
 user = {{.Username}}
 group = {{.Username}}
 
-; Unix socket for Nginx to connect to
 listen = /run/php/{{.Username}}.sock
 listen.owner = www-data
 listen.group = www-data
 listen.mode = 0660
 
-; Process manager — ondemand means zero RAM when site is idle
 pm = ondemand
 pm.max_children = {{.MaxChildren}}
 pm.process_idle_timeout = 10s
 pm.max_requests = 500
 
-; Logging
 access.log = /var/log/dnsfox/phpfpm-{{.SiteID}}-access.log
 php_admin_value[error_log] = /var/log/dnsfox/phpfpm-{{.SiteID}}-error.log
 php_admin_flag[log_errors] = on
 
-; Security — restrict to site directory
 php_admin_value[open_basedir] = /var/www/site_{{.SiteID}}:/tmp
 php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen
 
-; Session isolation
 php_value[session.save_path] = /var/lib/php/sessions/{{.Username}}
 `
 
 // poolConfigPath returns the path where the pool config should be written.
+// PHP 8.4 is installed via apt and uses the standard distro path.
+// All other versions are compiled from source under /usr/local/php{v}/.
 func poolConfigPath(siteID, phpVersion string) string {
-	return fmt.Sprintf("/etc/php/%s/fpm/pool.d/dnsfox-%s.conf", phpVersion, siteID)
+	if phpVersion == "8.4" {
+		return fmt.Sprintf("/etc/php/8.4/fpm/pool.d/dnsfox-%s.conf", siteID)
+	}
+	return fmt.Sprintf("/usr/local/php%s/etc/php-fpm.d/dnsfox-%s.conf", phpVersion, siteID)
 }
 
 // WritePoolConfig writes a PHP-FPM pool config file for a site.
 func WritePoolConfig(cfg PoolConfig) error {
-	// Ensure log directory exists
 	if err := os.MkdirAll("/var/log/dnsfox", 0755); err != nil {
 		return fmt.Errorf("create log dir: %w", err)
 	}
 
-	// Ensure session directory exists for this user
 	sessionDir := fmt.Sprintf("/var/lib/php/sessions/%s", cfg.Username)
 	if err := os.MkdirAll(sessionDir, 0700); err != nil {
 		return fmt.Errorf("create session dir: %w", err)
+	}
+	// Session dir must be owned by the site user so PHP-FPM workers can write to it.
+	if err := exec.Command("chown", cfg.Username+":"+cfg.Username, sessionDir).Run(); err != nil {
+		return fmt.Errorf("chown session dir: %w", err)
 	}
 
 	tmpl, err := template.New("pool").Parse(poolConfigTemplate)
@@ -86,9 +89,9 @@ func WritePoolConfig(cfg PoolConfig) error {
 	return tmpl.Execute(f, cfg)
 }
 
-// RemovePoolConfig removes the PHP-FPM pool config for a site across all PHP versions.
+// RemovePoolConfig removes the PHP-FPM pool config for a site across all supported versions.
 func RemovePoolConfig(siteID string) error {
-	versions := []string{"7.4", "8.0", "8.1", "8.2", "8.3", "8.4"}
+	versions := []string{"8.1", "8.2", "8.3", "8.4", "8.5"}
 	for _, v := range versions {
 		path := poolConfigPath(siteID, v)
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

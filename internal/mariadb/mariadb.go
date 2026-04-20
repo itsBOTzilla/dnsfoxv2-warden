@@ -22,10 +22,8 @@ func NewManager() *Manager {
 }
 
 // CreateSiteDatabase creates a MariaDB database and dedicated user for a site.
-// Database name: db_{siteID}
-// DB username:   db_{siteID}
-// Password:      randomly generated 32-char hex string
-// Credentials written to /var/www/<username>/.db_credentials (mode 0600).
+// Connects to 127.0.0.1:3307 (host MariaDB, not the Docker container on 3306).
+// Credentials are written to /var/www/<username>/.db_credentials (mode 0600).
 func (m *Manager) CreateSiteDatabase(siteID, username string) error {
 	dbName := sanitizeID(siteID)
 	dbUser := sanitizeID(siteID)
@@ -35,10 +33,11 @@ func (m *Manager) CreateSiteDatabase(siteID, username string) error {
 		return fmt.Errorf("generate password: %w", err)
 	}
 
+	// Grant is to 127.0.0.1, matching how PHP connects (DB_HOST=127.0.0.1).
 	sql := fmt.Sprintf(`
 CREATE DATABASE IF NOT EXISTS %s CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '%s'@'localhost' IDENTIFIED BY '%s';
-GRANT ALL PRIVILEGES ON %s.* TO '%s'@'localhost';
+CREATE USER IF NOT EXISTS '%s'@'127.0.0.1' IDENTIFIED BY '%s';
+GRANT ALL PRIVILEGES ON %s.* TO '%s'@'127.0.0.1';
 FLUSH PRIVILEGES;
 `, dbName, dbUser, password, dbName, dbUser)
 
@@ -46,10 +45,9 @@ FLUSH PRIVILEGES;
 		return fmt.Errorf("create database: %w", err)
 	}
 
-	// Write credentials to the site user's home dir, readable only by root
 	credsPath := fmt.Sprintf("/var/www/%s/.db_credentials", username)
-	creds := fmt.Sprintf("DB_NAME=%s\nDB_USER=%s\nDB_PASS=%s\nDB_HOST=localhost\n",
-		dbName, dbUser, password)
+	creds := fmt.Sprintf("; DNSFox v2 — auto-generated credentials for site %s\n; Do not edit manually — managed by Warden\nDB_NAME=%s\nDB_USER=%s\nDB_PASS=%s\nDB_HOST=127.0.0.1\nDB_PORT=3307\n",
+		siteID, dbName, dbUser, password)
 	if err := os.WriteFile(credsPath, []byte(creds), 0600); err != nil {
 		return fmt.Errorf("write credentials: %w", err)
 	}
@@ -64,16 +62,16 @@ func (m *Manager) DropSiteDatabase(siteID, username string) error {
 
 	sql := fmt.Sprintf(`
 DROP DATABASE IF EXISTS %s;
-DROP USER IF EXISTS '%s'@'localhost';
+DROP USER IF EXISTS '%s'@'127.0.0.1';
 FLUSH PRIVILEGES;
 `, dbName, dbUser)
 
 	return m.execSQL(sql)
 }
 
-// execSQL executes a SQL string against the local MariaDB instance.
+// execSQL executes a SQL string against the host MariaDB on 127.0.0.1:3307.
 func (m *Manager) execSQL(sql string) error {
-	args := []string{"-u", "root"}
+	args := []string{"-h", "127.0.0.1", "-P", "3307", "-u", "root"}
 	if m.RootPassword != "" {
 		args = append(args, "-p"+m.RootPassword)
 	}
