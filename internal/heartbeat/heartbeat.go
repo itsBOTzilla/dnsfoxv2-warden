@@ -19,9 +19,16 @@ import (
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/metrics"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/updater"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 	wardenv1connect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 )
+
+// ActiveJobCounter is implemented by jobs.Executor so the heartbeat can
+// check whether it is safe to self-update.
+type ActiveJobCounter interface {
+	ActiveJobCount() int
+}
 
 // setAgentToken attaches the WARDEN_AGENT_TOKEN env var to a Connect-Go
 // request header as X-Warden-Token. Called on every outbound RPC so the
@@ -44,6 +51,7 @@ type Reporter struct {
 	client     wardenv1connect.WardenServiceClient
 	cfg        *config.Config
 	cpuSampler *metrics.CPUSampler
+	jobCounter ActiveJobCounter
 
 	// onSync is called whenever the heartbeat response contains a
 	// ConfigSyncDirective (e.g. new WAF rules, cleanup script update).
@@ -56,11 +64,13 @@ type Reporter struct {
 // NewReporter constructs a Reporter. The CPUSampler is created here so that
 // the baseline sample is taken before the first heartbeat fires, giving a
 // meaningful CPU% reading from the second heartbeat onward.
+// jobCounter may be nil; if provided it is checked before self-updating.
 func NewReporter(
 	client wardenv1connect.WardenServiceClient,
 	cfg *config.Config,
 	onSync func(*wardenv1.ConfigSyncDirective),
 	onJobs func([]*wardenv1.AgentJob),
+	jobCounter ActiveJobCounter,
 ) *Reporter {
 	return &Reporter{
 		client:     client,
@@ -68,6 +78,7 @@ func NewReporter(
 		cpuSampler: metrics.NewCPUSampler(),
 		onSync:     onSync,
 		onJobs:     onJobs,
+		jobCounter: jobCounter,
 	}
 }
 
@@ -118,6 +129,17 @@ func (r *Reporter) sendHeartbeat(ctx context.Context) {
 	if resp.Msg.Sync != nil && r.onSync != nil {
 		log.Printf("[heartbeat] received config sync directive")
 		r.onSync(resp.Msg.Sync)
+		// Self-update check: apply new binary if version is newer and no jobs running.
+		if lv := resp.Msg.Sync.GetLatestWardenVersion(); lv != "" {
+			activeJobs := 0
+			if r.jobCounter != nil {
+				activeJobs = r.jobCounter.ActiveJobCount()
+			}
+			token := os.Getenv("WARDEN_AGENT_TOKEN")
+			if _, err := updater.CheckAndUpdate(ctx, r.cfg.APIUrl, token, lv, activeJobs); err != nil {
+				log.Printf("[heartbeat] self-update check error: %v", err)
+			}
+		}
 	}
 
 	if len(resp.Msg.PendingJobs) > 0 && r.onJobs != nil {

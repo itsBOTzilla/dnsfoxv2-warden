@@ -124,7 +124,25 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 		return e.handleProvisionNodeJS(ctx, payload)
 
 	case wardenv1.JobType_JOB_TYPE_DEPROVISION_SITE:
-		return e.handleDeprovisionSite(ctx, payload)
+		return e.handleDeprovisionSiteJob(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_BACKUP_SITE:
+		return e.handleBackupSite(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_RESTORE_SITE:
+		return e.handleRestoreSite(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_SUSPEND_SITE:
+		return e.handleSuspendSite(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_UNSUSPEND_SITE:
+		return e.handleUnsuspendSite(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_SCAN_MALWARE:
+		return e.handleScanMalware(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_CHANGE_PHP_VERSION:
+		return e.handleChangePHPVersion(ctx, payload)
 
 	case wardenv1.JobType_JOB_TYPE_PURGE_CACHE:
 		return e.handlePurgeCache(ctx, payload)

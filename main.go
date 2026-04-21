@@ -197,7 +197,7 @@ func main() {
 	// Start heartbeat loop in background.
 	reporter := heartbeat.NewReporter(apiClient, cfg, onSync, func(j []*wardenv1.AgentJob) {
 		onJobs(j, jobExec, tracker)
-	})
+	}, jobExec)
 	go reporter.Run(ctx)
 
 	// Start per-site resource usage reporting loop in background.
