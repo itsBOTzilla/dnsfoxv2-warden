@@ -39,7 +39,7 @@ access.log = /var/log/dnsfox/phpfpm-{{.SiteID}}-access.log
 php_admin_value[error_log] = /var/log/dnsfox/phpfpm-{{.SiteID}}-error.log
 php_admin_flag[log_errors] = on
 
-php_admin_value[open_basedir] = /var/www/site_{{.SiteID}}:/tmp
+php_admin_value[open_basedir] = /var/www/{{.Username}}:/tmp
 php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen
 
 php_value[session.save_path] = /var/lib/php/sessions/{{.Username}}

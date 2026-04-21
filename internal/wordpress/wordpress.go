@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -39,13 +40,48 @@ const (
 // WPParams carries WordPress-specific provisioning parameters.
 // All fields except AdminEmail are optional — the provisioner generates
 // secure defaults when they are empty.
+//
+// Two JSON shapes are accepted on the wire:
+//   - Canonical v2 shape:  {"admin_email":"…","admin_password":"…"}
+//   - Legacy / API shape:  {"wp_admin_email":"…","wp_admin_password":"…",
+//                           "wp_site_title":"…"}
+// Aliases are exposed via fallback fields filled in on UnmarshalJSON.
 type WPParams struct {
 	// AdminEmail is the WordPress admin account email. Required.
 	AdminEmail string `json:"admin_email"`
 	// AdminPassword is the WordPress admin password. Warden generates one if empty.
 	AdminPassword string `json:"admin_password"`
+	// SiteTitle is the WordPress Site Title. Optional; defaults to the domain.
+	SiteTitle string `json:"site_title"`
 	// SkipInstall skips wp core install (used in migration mode — files come from backup).
 	SkipInstall bool `json:"skip_install"`
+}
+
+// UnmarshalJSON accepts both the canonical ("admin_email") and legacy
+// ("wp_admin_email") payload shapes, preferring the canonical keys when both
+// are present so on-wire v2 payloads never get shadowed by legacy aliases.
+func (p *WPParams) UnmarshalJSON(data []byte) error {
+	type alias WPParams
+	var raw struct {
+		alias
+		WPAdminEmail    string `json:"wp_admin_email"`
+		WPAdminPassword string `json:"wp_admin_password"`
+		WPSiteTitle     string `json:"wp_site_title"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = WPParams(raw.alias)
+	if p.AdminEmail == "" {
+		p.AdminEmail = raw.WPAdminEmail
+	}
+	if p.AdminPassword == "" {
+		p.AdminPassword = raw.WPAdminPassword
+	}
+	if p.SiteTitle == "" {
+		p.SiteTitle = raw.WPSiteTitle
+	}
+	return nil
 }
 
 // Provisioner runs the WordPress-specific install steps after base provisioning.
@@ -65,7 +101,9 @@ func New(cfg *config.Config) *Provisioner {
 // This function is idempotent at the WP core level: if wp-config.php already
 // exists (e.g. after a failed partial run), WP core install is skipped.
 func (p *Provisioner) ProvisionWordPress(ctx context.Context, siteCfg provisioning.SiteConfig, params WPParams) error {
-	username := "site_" + siteCfg.SiteID
+	// Use the same helper as provisioning.go so the username matches what
+	// CreateSystemUser created (15-char cap on the UUID part).
+	username := provisioning.SiteUsername(siteCfg.SiteID)
 	docroot := fmt.Sprintf("/var/www/%s/public", username)
 	credsPath := fmt.Sprintf("/var/www/%s/.db_credentials", username)
 

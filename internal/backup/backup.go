@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 )
 
 // BackupSite creates an archive of the site and uploads it to B2.
@@ -31,7 +33,9 @@ func BackupSite(ctx context.Context, siteID, backupType, b2KeyID, b2AppKey, b2Bu
 		return "", 0, fmt.Errorf("backup: b2 auth: %w", err)
 	}
 
-	username := "site_" + siteID
+	// Use the canonical SiteUsername helper so the directory matches what
+	// provisioning.CreateSystemUser created (15-char UUID cap).
+	username := provisioning.SiteUsername(siteID)
 	siteDir := "/var/www/" + username
 
 	switch backupType {

@@ -10,13 +10,22 @@ import (
 
 // Manager handles MariaDB database and user provisioning.
 type Manager struct {
+	RootUser     string
 	RootPassword string
 }
 
 // NewManager creates a new MariaDB Manager.
-// Root password is read from MARIADB_ROOT_PASSWORD env var.
+// The administrative account is read from MARIADB_ROOT_USER (defaults to
+// "root") and MARIADB_ROOT_PASSWORD env vars.  On hosts where root auth is
+// unix_socket-only, provision a dedicated TCP user with GRANT OPTION and set
+// MARIADB_ROOT_USER to that user.
 func NewManager() *Manager {
+	user := os.Getenv("MARIADB_ROOT_USER")
+	if user == "" {
+		user = "root"
+	}
 	return &Manager{
+		RootUser:     user,
 		RootPassword: os.Getenv("MARIADB_ROOT_PASSWORD"),
 	}
 }
@@ -71,7 +80,7 @@ FLUSH PRIVILEGES;
 
 // execSQL executes a SQL string against the host MariaDB on 127.0.0.1:3307.
 func (m *Manager) execSQL(sql string) error {
-	args := []string{"-h", "127.0.0.1", "-P", "3307", "-u", "root"}
+	args := []string{"-h", "127.0.0.1", "-P", "3307", "-u", m.RootUser}
 	if m.RootPassword != "" {
 		args = append(args, "-p"+m.RootPassword)
 	}
@@ -86,9 +95,24 @@ func (m *Manager) execSQL(sql string) error {
 }
 
 // sanitizeID converts a site ID to a safe database/user name.
-// Prefix db_ ensures it starts with a letter; capped at 16 chars for the ID part.
+// MariaDB identifiers must consist of [A-Za-z0-9_$] (unquoted), so hyphens
+// from UUIDs are replaced with underscores.  Prefix db_ ensures it starts
+// with a letter; capped at 16 chars for the ID part to keep total length
+// well under the 64-char MariaDB identifier limit.
 func sanitizeID(siteID string) string {
-	id := siteID
+	// Strip hyphens before truncation so the 16 chars are dense.
+	out := make([]byte, 0, len(siteID))
+	for i := 0; i < len(siteID); i++ {
+		c := siteID[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			out = append(out, c)
+		default:
+			// hyphens, dots, etc. become underscores
+			out = append(out, '_')
+		}
+	}
+	id := string(out)
 	if len(id) > 16 {
 		id = id[:16]
 	}

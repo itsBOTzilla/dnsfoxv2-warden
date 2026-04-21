@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 )
 
 // RestoreSite downloads a backup from B2 and restores it to the site directory.
@@ -39,7 +41,7 @@ func RestoreSite(ctx context.Context, siteID, fileID, restoreType, b2KeyID, b2Ap
 
 // restoreFiles extracts a tar.gz archive into the site directory.
 func restoreFiles(ctx context.Context, siteID string, data []byte) error {
-	username := "site_" + siteID
+	username := provisioning.SiteUsername(siteID)
 	destDir := "/var/www/" + username
 
 	if err := os.MkdirAll(destDir, 0750); err != nil {

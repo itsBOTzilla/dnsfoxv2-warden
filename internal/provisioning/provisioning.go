@@ -254,17 +254,34 @@ func CreateSystemUser(username string) error {
 }
 
 // createSystemUser is the unexported implementation.
+// Exit code 9 from useradd means "username or GID already in use".  If a
+// stale group with the same name exists (e.g. after a failed userdel -r),
+// useradd --user-group refuses to create the user — so we first check and
+// pass --gid to attach to the existing group.  If the user also already
+// exists the call is a no-op.
 func createSystemUser(username string) error {
-	cmd := exec.Command("useradd",
+	// If the user already exists we're done.
+	if _, err := exec.Command("id", "-u", username).Output(); err == nil {
+		return nil
+	}
+
+	args := []string{
 		"--system",
 		"--no-create-home",
 		"--shell", "/usr/sbin/nologin",
-		username,
-	)
+	}
+	// Detect an existing group with the same name and reuse it.
+	if _, err := exec.Command("getent", "group", username).Output(); err == nil {
+		args = append(args, "--gid", username, "--no-user-group")
+	}
+	args = append(args, username)
+
+	cmd := exec.Command("useradd", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 9 {
-			return nil // user already exists
+		// Recheck: if the user now exists (race), succeed.
+		if _, err2 := exec.Command("id", "-u", username).Output(); err2 == nil {
+			return nil
 		}
 		return fmt.Errorf("useradd failed: %s: %w", out, err)
 	}
