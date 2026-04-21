@@ -23,6 +23,15 @@ import (
 	wardenv1connect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 )
 
+// setAgentToken attaches the WARDEN_AGENT_TOKEN env var to a Connect-Go
+// request header as X-Warden-Token. Called on every outbound RPC so the
+// API can authenticate the request.
+func setAgentToken[T any](req *connect.Request[T]) {
+	if token := os.Getenv("WARDEN_AGENT_TOKEN"); token != "" {
+		req.Header().Set("X-Warden-Token", token)
+	}
+}
+
 const (
 	heartbeatInterval = 15 * time.Second
 	wardenVersion     = "2.0.0"
@@ -93,6 +102,7 @@ func (r *Reporter) sendHeartbeat(ctx context.Context) {
 	req := connect.NewRequest(&wardenv1.ReportHeartbeatRequest{
 		Heartbeat: beat,
 	})
+	setAgentToken(req)
 
 	log.Printf("[heartbeat] metrics — CPU %.1f%% RAM %.0f/%.0fMB disk %.1f/%.1fGB load %.2f sites %d",
 		beat.CpuPercent, beat.RamUsedMb, beat.RamTotalMb,

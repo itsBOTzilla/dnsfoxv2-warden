@@ -203,11 +203,15 @@ func (e *Executor) reportResult(jobID string, jobErr error) {
 	defer cancel()
 
 	apiClient := wardenv1connect.NewWardenServiceClient(&http.Client{}, e.cfg.APIUrl)
-	_, err := apiClient.ReportJobResult(ctx, connect.NewRequest(&wardenv1.ReportJobResultRequest{
+	req := connect.NewRequest(&wardenv1.ReportJobResultRequest{
 		JobId:        jobID,
 		Status:       status,
 		ErrorMessage: errMsg,
-	}))
+	})
+	if token := os.Getenv("WARDEN_AGENT_TOKEN"); token != "" {
+		req.Header().Set("X-Warden-Token", token)
+	}
+	_, err := apiClient.ReportJobResult(ctx, req)
 	if err != nil {
 		log.Printf("[executor] reportResult job=%s failed: %v", jobID, err)
 	}

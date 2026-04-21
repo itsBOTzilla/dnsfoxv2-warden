@@ -127,9 +127,13 @@ func (r *Reporter) report(ctx context.Context) {
 	rpcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	_, err = r.apiClient.ReportSiteUsage(rpcCtx, connect.NewRequest(&wardenv1.ReportSiteUsageRequest{
+	siteReq := connect.NewRequest(&wardenv1.ReportSiteUsageRequest{
 		Usages: usages,
-	}))
+	})
+	if token := os.Getenv("WARDEN_AGENT_TOKEN"); token != "" {
+		siteReq.Header().Set("X-Warden-Token", token)
+	}
+	_, err = r.apiClient.ReportSiteUsage(rpcCtx, siteReq)
 	if err != nil {
 		log.Printf("[siteusage] report failed: %v", err)
 	} else {
