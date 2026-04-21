@@ -27,6 +27,7 @@ import (
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/executor"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/filemgr"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/heartbeat"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/jobs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/metrics"
@@ -84,6 +85,27 @@ type wardenHandler struct {
 	tracker *jobTracker
 	cfg     *config.Config
 	cpuSampler *metrics.CPUSampler
+	files      *filemgr.Handler
+}
+
+// ── File manager RPCs (delegate to filemgr.Handler) ─────────────────────────
+func (h *wardenHandler) ListFiles(ctx context.Context, req *connect.Request[wardenv1.ListFilesRequest]) (*connect.Response[wardenv1.ListFilesResponse], error) {
+	return h.files.ListFiles(ctx, req)
+}
+func (h *wardenHandler) ReadFile(ctx context.Context, req *connect.Request[wardenv1.ReadFileRequest]) (*connect.Response[wardenv1.ReadFileResponse], error) {
+	return h.files.ReadFile(ctx, req)
+}
+func (h *wardenHandler) WriteFile(ctx context.Context, req *connect.Request[wardenv1.WriteFileRequest]) (*connect.Response[wardenv1.WriteFileResponse], error) {
+	return h.files.WriteFile(ctx, req)
+}
+func (h *wardenHandler) DeleteFile(ctx context.Context, req *connect.Request[wardenv1.DeleteFileRequest]) (*connect.Response[wardenv1.DeleteFileResponse], error) {
+	return h.files.DeleteFile(ctx, req)
+}
+func (h *wardenHandler) CreateDirectory(ctx context.Context, req *connect.Request[wardenv1.CreateDirectoryRequest]) (*connect.Response[wardenv1.CreateDirectoryResponse], error) {
+	return h.files.CreateDirectory(ctx, req)
+}
+func (h *wardenHandler) MoveFile(ctx context.Context, req *connect.Request[wardenv1.MoveFileRequest]) (*connect.Response[wardenv1.MoveFileResponse], error) {
+	return h.files.MoveFile(ctx, req)
 }
 
 // keep connect referenced to prevent mod tidy from dropping the import.
@@ -216,10 +238,15 @@ func main() {
 		tracker:    tracker,
 		cfg:        cfg,
 		cpuSampler: metrics.NewCPUSampler(),
+		files:      filemgr.NewHandler(),
 	}))
 
 	// Register HTTP handler for inbound site migration file uploads.
 	mux.Handle("/migration/receive/", migration.ReceiveHandler(cfg.APIToken))
+
+	// Register HTTP handler for file-manager multipart uploads.
+	// Authenticates via WARDEN_INTERNAL_TOKEN (shared with the v2 API).
+	mux.Handle("/api/files/upload", filemgr.UploadHandler(cfg.InternalToken))
 
 	addr := ":" + cfg.GRPCPort
 	log.Printf("[warden] listening on %s (h2c)", addr)

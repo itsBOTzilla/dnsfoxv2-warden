@@ -38,6 +38,10 @@ type Config struct {
 	// PayloadEncryptionKey is the hex-encoded AES-256 key used to decrypt
 	// AgentJob.encrypted_payload fields delivered via heartbeat.
 	PayloadEncryptionKey string
+	// InternalToken is a shared secret the v2 API presents on Authorization
+	// when calling privileged warden endpoints (file manager upload, etc.).
+	// When empty, privileged HTTP endpoints return 401 unauthorized.
+	InternalToken string
 }
 
 // Load reads config from WARDEN_* environment variables and validates required fields.
@@ -63,6 +67,7 @@ func Load() (*Config, error) {
 		APIToken:             getEnv("WARDEN_API_TOKEN", ""),
 		SMTPRelaySecret:      getEnv("WARDEN_SMTP_RELAY_SECRET", ""),
 		PayloadEncryptionKey: getEnv("WARDEN_PAYLOAD_ENCRYPTION_KEY", ""),
+		InternalToken:        getEnv("WARDEN_INTERNAL_TOKEN", ""),
 	}
 
 	if cfg.ServerID == "" {
