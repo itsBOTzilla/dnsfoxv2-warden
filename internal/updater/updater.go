@@ -20,8 +20,9 @@ import (
 	"time"
 )
 
-// CurrentVersion is set at build time via -ldflags.
-var CurrentVersion = "0.1.0"
+// CurrentVersion is set at build time via -ldflags. The baked-in default
+// tracks what the warden reports when launched without a version override.
+var CurrentVersion = "0.7.1"
 
 // CheckAndUpdate downloads and installs a newer binary if available.
 // Returns true if an update was applied (process will restart via systemctl).

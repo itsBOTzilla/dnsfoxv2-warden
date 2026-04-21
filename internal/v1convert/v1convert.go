@@ -88,13 +88,24 @@ func (c *Converter) ConvertNodejsSite(ctx context.Context, req NodejsRequest) (*
 	log.Printf("[v1convert] inspected %s port=%d mountsrc=%s", appName, info.PublishedPort, info.SourceDir)
 
 	// 2. Backup the volume to a tarball.
+	//    Pause the container first so writes stop during the tar — the first
+	//    Node.js pilot revealed a data-corruption race when the app wrote to
+	//    /app mid-tar. Unpause afterwards regardless of tar result so the site
+	//    keeps serving if we bail out before the swap.
 	backupDir := "/var/backups/v1convert"
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir backup dir: %w", err)
 	}
 	backupPath := filepath.Join(backupDir, fmt.Sprintf("%s-%s.tar.gz", req.SiteID, time.Now().UTC().Format("20060102T150405Z")))
-	if err := tarballDir(ctx, info.SourceDir, backupPath); err != nil {
-		return nil, fmt.Errorf("backup tarball: %w", err)
+	if err := pauseContainer(ctx, appName); err != nil {
+		log.Printf("[v1convert] warn: pause %s: %v", appName, err)
+	}
+	tarErr := tarballDir(ctx, info.SourceDir, backupPath)
+	if err := unpauseContainer(ctx, appName); err != nil {
+		log.Printf("[v1convert] warn: unpause %s: %v", appName, err)
+	}
+	if tarErr != nil {
+		return nil, fmt.Errorf("backup tarball: %w", tarErr)
 	}
 	log.Printf("[v1convert] backup created %s", backupPath)
 

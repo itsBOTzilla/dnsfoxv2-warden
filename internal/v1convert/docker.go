@@ -149,3 +149,45 @@ func startContainer(ctx context.Context, name string) error {
 	_, err := runCmd(ctx, "docker", "start", name)
 	return err
 }
+
+// pauseContainer SIGSTOPs all processes inside the container so filesystem
+// state is frozen during backup.  Returns nil if the container is not running
+// (already stopped containers don't need pausing).
+func pauseContainer(ctx context.Context, name string) error {
+	if !containerRunning(ctx, name) {
+		return nil
+	}
+	_, err := runCmd(ctx, "docker", "pause", name)
+	return err
+}
+
+// unpauseContainer reverses pauseContainer.  Safe to call on a non-paused
+// container — errors are returned to the caller who can log-and-continue.
+func unpauseContainer(ctx context.Context, name string) error {
+	_, err := runCmd(ctx, "docker", "unpause", name)
+	return err
+}
+
+// containerRunning returns true iff `docker inspect -f {{.State.Running}}`
+// prints "true".  Used to decide whether pause/unpause is meaningful.
+func containerRunning(ctx context.Context, name string) bool {
+	out, err := exec.CommandContext(ctx, "docker", "inspect",
+		"-f", "{{.State.Running}}", name).Output()
+	if err != nil {
+		return false
+	}
+	return string(bytesTrim(out)) == "true"
+}
+
+// bytesTrim trims trailing whitespace without importing strings/bytes just for this.
+func bytesTrim(b []byte) []byte {
+	for len(b) > 0 {
+		c := b[len(b)-1]
+		if c == '\n' || c == '\r' || c == ' ' || c == '\t' {
+			b = b[:len(b)-1]
+			continue
+		}
+		break
+	}
+	return b
+}
