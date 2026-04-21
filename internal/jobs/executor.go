@@ -178,6 +178,15 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 	case wardenv1.JobType_JOB_TYPE_CONVERT_V1_TO_V2:
 		return e.handleConvertV1ToV2(ctx, payload)
 
+	case wardenv1.JobType_JOB_TYPE_DOCKER_RESTART:
+		return e.handleDockerRestart(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_DOCKER_STOP:
+		return e.handleDockerStop(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_DOCKER_LOGS:
+		return e.handleDockerLogs(ctx, payload)
+
 	case wardenv1.JobType_JOB_TYPE_SYNC_CLEANUP_SCRIPT,
 		wardenv1.JobType_JOB_TYPE_RUN_WP_CLI:
 		// These are handled by the heartbeat sync path or direct invocation.
