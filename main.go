@@ -27,8 +27,10 @@ import (
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/executor"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/archive"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/filemgr"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/heartbeat"
+	ptypkg "github.com/itsBOTzilla/dnsfoxv2-warden/internal/pty"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/jobs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/metrics"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/migration"
@@ -219,7 +221,7 @@ func main() {
 
 	// Start heartbeat loop in background.
 	reporter := heartbeat.NewReporter(apiClient, cfg, onSync, func(j []*wardenv1.AgentJob) {
-		onJobs(j, jobExec, tracker)
+		onJobs(j, jobExec, tracker, cfg)
 	}, jobExec)
 	go reporter.Run(ctx)
 
@@ -248,6 +250,15 @@ func main() {
 	// Authenticates via WARDEN_INTERNAL_TOKEN (shared with the v2 API).
 	mux.Handle("/api/files/upload", filemgr.UploadHandler(cfg.InternalToken))
 
+	// PTY bridge (browser terminal). Guarded by X-Warden-Internal-Token.
+	mux.Handle("/api/pty/", ptypkg.Handler(cfg.InternalToken))
+
+	// File-manager archive creation + download. Create requires the bearer token;
+	// download is guarded by the single-use random token returned from create.
+	archive.StartJanitor()
+	mux.Handle("POST /api/files/archive", archive.CreateHandler(cfg.InternalToken))
+	mux.Handle("GET /api/files/archive/{token}", archive.DownloadHandler())
+
 	addr := ":" + cfg.GRPCPort
 	log.Printf("[warden] listening on %s (h2c)", addr)
 
@@ -267,11 +278,38 @@ func onSync(sync *wardenv1.ConfigSyncDirective) {
 }
 
 // onJobs dispatches heartbeat-delivered jobs to the job executor.
-func onJobs(agentJobs []*wardenv1.AgentJob, exec *jobs.Executor, tracker *jobTracker) {
+func onJobs(agentJobs []*wardenv1.AgentJob, exec *jobs.Executor, tracker *jobTracker, cfg *config.Config) {
 	for _, j := range agentJobs {
 		log.Printf("[warden] heartbeat job: id=%s type=%s", j.GetJobId(), j.GetType())
 	}
 	exec.ProcessJobs(context.Background(), agentJobs, func(jobID string, status wardenv1.ProvisioningStatus, errMsg string) {
 		tracker.record(jobID, status, errMsg)
+		// Also report back via ReportJobResult so the API marks agent_jobs
+		// (status, completed_at, error_message) and stops redelivering the job.
+		// Heartbeat-delivered jobs historically only stored their result in
+		// memory here, which is why completed_at was never stamped and why the
+		// Node.js converter saw the same job redelivered on every tick.
+		reportJobResultToAPI(cfg, jobID, status, errMsg)
 	})
+}
+
+// reportJobResultToAPI posts a ReportJobResult RPC back to the v2 API so the
+// agent_jobs row is flipped to completed/failed with completed_at=NOW().
+// Best-effort — errors are logged, not returned.
+func reportJobResultToAPI(cfg *config.Config, jobID string, status wardenv1.ProvisioningStatus, errMsg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	apiClient := wardenconnect.NewWardenServiceClient(&http.Client{}, cfg.APIUrl)
+	req := connect.NewRequest(&wardenv1.ReportJobResultRequest{
+		JobId:        jobID,
+		Status:       status,
+		ErrorMessage: errMsg,
+	})
+	if token := os.Getenv("WARDEN_AGENT_TOKEN"); token != "" {
+		req.Header().Set("X-Warden-Token", token)
+	}
+	if _, err := apiClient.ReportJobResult(ctx, req); err != nil {
+		log.Printf("[warden] ReportJobResult job=%s failed: %v", jobID, err)
+	}
 }

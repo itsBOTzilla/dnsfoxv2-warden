@@ -9,6 +9,10 @@ require (
 	google.golang.org/protobuf v1.36.11
 )
 
-require golang.org/x/text v0.36.0 // indirect
+require (
+	github.com/creack/pty v1.1.24 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
+	golang.org/x/text v0.36.0 // indirect
+)
 
 replace github.com/itsBOTzilla/dnsfoxv2-proto => ../dnsfoxv2-proto
