@@ -140,6 +140,19 @@ func (r *Reporter) sendHeartbeat(ctx context.Context) {
 			log.Printf("[heartbeat] B2 credentials updated from sync directive")
 		}
 
+		// Store MariaDB root credentials delivered via sync directive.
+		if pass := resp.Msg.Sync.GetMariadbRootPass(); pass != "" {
+			credsstore.SetMariaDB(credsstore.MariaDBCreds{
+				RootUser:     resp.Msg.Sync.GetMariadbRootUser(),
+				RootPassword: pass,
+			})
+		}
+
+		// Store shared warden-internal-token delivered via sync directive.
+		if tok := resp.Msg.Sync.GetWardenInternalToken(); tok != "" {
+			credsstore.SetWardenInternalToken(tok)
+		}
+
 		// Self-update check: apply new binary if version is newer and no jobs running.
 		if lv := resp.Msg.Sync.GetLatestWardenVersion(); lv != "" {
 			activeJobs := 0

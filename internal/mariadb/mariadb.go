@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/credsstore"
 )
 
 // Manager handles MariaDB database and user provisioning.
@@ -20,13 +22,22 @@ type Manager struct {
 // unix_socket-only, provision a dedicated TCP user with GRANT OPTION and set
 // MARIADB_ROOT_USER to that user.
 func NewManager() *Manager {
-	user := os.Getenv("MARIADB_ROOT_USER")
-	if user == "" {
-		user = "root"
+	// Prefer credentials delivered over heartbeat sync directive; fall back
+	// to environment for backwards-compat during rollout.
+	c := credsstore.GetMariaDB()
+	if c.RootPassword == "" {
+		c.RootPassword = os.Getenv("MARIADB_ROOT_PASSWORD")
+	}
+	if c.RootUser == "" {
+		if u := os.Getenv("MARIADB_ROOT_USER"); u != "" {
+			c.RootUser = u
+		} else {
+			c.RootUser = "root"
+		}
 	}
 	return &Manager{
-		RootUser:     user,
-		RootPassword: os.Getenv("MARIADB_ROOT_PASSWORD"),
+		RootUser:     c.RootUser,
+		RootPassword: c.RootPassword,
 	}
 }
 

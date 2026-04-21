@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/credsstore"
 )
 
 // mysqldumpFromContainer runs mysqldump inside a MariaDB docker container and
@@ -73,11 +75,19 @@ func containerEnv(ctx context.Context, container string, keys []string) (string,
 // 127.0.0.1:3307, selecting database dbName.  Uses the admin credentials
 // that mariadb.Manager uses — read from MARIADB_ROOT_USER/PASSWORD env.
 func importSQLDump(ctx context.Context, srcGz, dbName string) error {
-	rootUser := os.Getenv("MARIADB_ROOT_USER")
+	mc := credsstore.GetMariaDB()
+	rootUser := mc.RootUser
 	if rootUser == "" {
-		rootUser = "root"
+		if u := os.Getenv("MARIADB_ROOT_USER"); u != "" {
+			rootUser = u
+		} else {
+			rootUser = "root"
+		}
 	}
-	rootPass := os.Getenv("MARIADB_ROOT_PASSWORD")
+	rootPass := mc.RootPassword
+	if rootPass == "" {
+		rootPass = os.Getenv("MARIADB_ROOT_PASSWORD")
+	}
 
 	f, err := os.Open(srcGz)
 	if err != nil {

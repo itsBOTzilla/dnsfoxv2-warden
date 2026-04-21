@@ -28,6 +28,7 @@ import (
 	"connectrpc.com/connect"
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/credsstore"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 	wardenv1connect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
@@ -180,7 +181,10 @@ func (m *Migrator) dumpDatabase(dbName, dstPath string) error {
 	args := []string{
 		"-h", "127.0.0.1", "-P", "3307", "-u", "root",
 	}
-	rootPw := os.Getenv("MARIADB_ROOT_PASSWORD")
+	rootPw := credsstore.GetMariaDB().RootPassword
+	if rootPw == "" {
+		rootPw = os.Getenv("MARIADB_ROOT_PASSWORD")
+	}
 	if rootPw != "" {
 		args = append(args, "-p"+rootPw)
 	}

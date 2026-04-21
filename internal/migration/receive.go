@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/credsstore"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 )
 
@@ -162,7 +163,10 @@ func importDB(r io.Reader, siteID string) error {
 	}
 
 	args := []string{"-h", "127.0.0.1", "-P", "3307", "-u", "root"}
-	rootPw := os.Getenv("MARIADB_ROOT_PASSWORD")
+	rootPw := credsstore.GetMariaDB().RootPassword
+	if rootPw == "" {
+		rootPw = os.Getenv("MARIADB_ROOT_PASSWORD")
+	}
 	if rootPw != "" {
 		args = append(args, "-p"+rootPw)
 	}
