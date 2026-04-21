@@ -19,6 +19,9 @@ import (
 // RestoreSite downloads a backup from B2 and restores it to the site directory.
 // restoreType: "files" or "db"
 func RestoreSite(ctx context.Context, siteID, fileID, restoreType, b2KeyID, b2AppKey string) error {
+	if err := validateSiteID(siteID); err != nil {
+		return err
+	}
 	b2, err := newB2Client(ctx, b2KeyID, b2AppKey, "")
 	if err != nil {
 		return fmt.Errorf("restore: b2 auth: %w", err)

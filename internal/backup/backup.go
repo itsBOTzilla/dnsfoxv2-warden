@@ -12,15 +12,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 )
 
+// uuidRegex matches a canonical lowercase UUID (8-4-4-4-12 hex chars).
+// siteID is concatenated into filesystem paths, DB/user names, and B2 object
+// keys — a strict check here is the simplest defence against path-traversal,
+// shell-metachar, and SQL-injection attempts via a compromised API caller.
+// See V2_SECURITY_AUDIT.md M6.
+var uuidRegex = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
+
+// validateSiteID returns nil if id is a canonical lowercase UUID, else an error.
+func validateSiteID(id string) error {
+	if !uuidRegex.MatchString(id) {
+		return fmt.Errorf("invalid site_id: must be a canonical lowercase UUID")
+	}
+	return nil
+}
+
 // BackupSite creates an archive of the site and uploads it to B2.
 // backupType: "files", "db", or "full"
 // Returns the B2 file ID, size in bytes, and any error.
 func BackupSite(ctx context.Context, siteID, backupType, b2KeyID, b2AppKey, b2Bucket string) (fileID string, sizeBytes int64, err error) {
+	if err := validateSiteID(siteID); err != nil {
+		return "", 0, err
+	}
 	ts := time.Now().UTC().Format("20060102-150405")
 	tmpDir, err := os.MkdirTemp("", "dnsfox-backup-"+siteID)
 	if err != nil {
