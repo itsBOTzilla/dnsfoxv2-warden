@@ -107,12 +107,19 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 ) {
 	var payload map[string]interface{}
 	if len(job.EncryptedPayload) > 0 {
-		p, err := e.decryptPayload(job.EncryptedPayload)
-		if err != nil {
-			return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED,
-				fmt.Sprintf("decrypt payload: %v", err)
+		// The v2 API queues jobs with a raw JSON payload (stored in agent_jobs.payload::jsonb).
+		// Encrypted payloads are reserved for future direct-gRPC flows. Try JSON first —
+		// if it parses as an object, use it; otherwise attempt AES-GCM decryption.
+		if p, ok := tryParseJSONPayload(job.EncryptedPayload); ok {
+			payload = p
+		} else {
+			p, err := e.decryptPayload(job.EncryptedPayload)
+			if err != nil {
+				return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED,
+					fmt.Sprintf("decrypt payload: %v", err)
+			}
+			payload = p
 		}
-		payload = p
 	}
 
 	switch job.Type {
@@ -168,6 +175,9 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 	case wardenv1.JobType_JOB_TYPE_MIGRATE_SITE:
 		return e.handleMigrateSite(ctx, payload)
 
+	case wardenv1.JobType_JOB_TYPE_CONVERT_V1_TO_V2:
+		return e.handleConvertV1ToV2(ctx, payload)
+
 	case wardenv1.JobType_JOB_TYPE_SYNC_CLEANUP_SCRIPT,
 		wardenv1.JobType_JOB_TYPE_RUN_WP_CLI:
 		// These are handled by the heartbeat sync path or direct invocation.
@@ -178,6 +188,29 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED,
 			fmt.Sprintf("unknown job type: %s", job.Type)
 	}
+}
+
+// tryParseJSONPayload returns (payload, true) when data is valid JSON object.
+// Used as the first attempt before falling through to AES-GCM decryption.
+func tryParseJSONPayload(data []byte) (map[string]interface{}, bool) {
+	trimmed := []byte{}
+	for _, b := range data {
+		if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+			continue
+		}
+		trimmed = append(trimmed, b)
+		if len(trimmed) > 0 {
+			break
+		}
+	}
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, false
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, false
+	}
+	return payload, true
 }
 
 // decryptPayload decrypts an AES-256-GCM encrypted job payload and unmarshals it.
