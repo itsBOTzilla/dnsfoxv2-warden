@@ -42,7 +42,6 @@ func setAgentToken[T any](req *connect.Request[T]) {
 
 const (
 	heartbeatInterval = 15 * time.Second
-	wardenVersion     = "2.0.0"
 	docrootBase       = "/var/www"
 )
 
@@ -208,7 +207,7 @@ func (r *Reporter) collectMetrics() *wardenv1.ServerHeartbeat {
 		DiskTotalGb:   disk.TotalGB,
 		LoadAverage:   load,
 		Services:      services,
-		WardenVersion:  wardenVersion,
+		WardenVersion:  updater.CurrentVersion,
 		SiteCount:     siteCount,
 		Timestamp:     timestamppb.Now(),
 	}

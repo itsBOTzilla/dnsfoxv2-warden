@@ -32,6 +32,7 @@ import (
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/metrics"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/migration"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/siteusage"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/updater"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 	wardenconnect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 )
@@ -150,7 +151,7 @@ func (h *wardenHandler) GetServerStats(
 		DiskTotalGb:   disk.TotalGB,
 		LoadAverage:   load,
 		Services:      svcs,
-		WardenVersion:  "2.0.0",
+		WardenVersion:  updater.CurrentVersion,
 		SiteCount:     siteCount,
 		Timestamp:     timestamppb.Now(),
 	}

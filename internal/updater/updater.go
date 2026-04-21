@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -69,15 +70,36 @@ func CheckAndUpdate(ctx context.Context, apiURL, token, newVersion string, activ
 		}
 	}
 
-	// Write to temp file.
-	tmpPath := "/tmp/warden-v2-new"
-	if err := os.WriteFile(tmpPath, data, 0755); err != nil {
+	// Write to a temp file in the SAME directory as the destination so the
+	// final rename is atomic and never crosses a filesystem boundary
+	// (/tmp is commonly tmpfs on VPSes, triggering EXDEV on rename).
+	destPath := "/usr/local/bin/warden-v2"
+	destDir := filepath.Dir(destPath)
+	tmpFile, err := os.CreateTemp(destDir, ".warden-v2-new-*")
+	if err != nil {
+		return false, fmt.Errorf("updater: create temp: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	// Best-effort cleanup on any failure path.
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		cleanup()
 		return false, fmt.Errorf("updater: write binary: %w", err)
 	}
+	if err := tmpFile.Chmod(0o755); err != nil {
+		_ = tmpFile.Close()
+		cleanup()
+		return false, fmt.Errorf("updater: chmod: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		cleanup()
+		return false, fmt.Errorf("updater: close: %w", err)
+	}
 
-	// Atomic rename on the same filesystem.
-	destPath := "/usr/local/bin/warden-v2"
 	if err := os.Rename(tmpPath, destPath); err != nil {
+		cleanup()
 		return false, fmt.Errorf("updater: install binary: %w", err)
 	}
 
