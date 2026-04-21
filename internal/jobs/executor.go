@@ -159,6 +159,21 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 	case wardenv1.JobType_JOB_TYPE_ISSUE_CERTIFICATE:
 		return e.handleIssueCertificate(ctx, payload)
 
+	case wardenv1.JobType_JOB_TYPE_CLONE_FILES:
+		return e.handleCloneFiles(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_PUSH_TO_PRODUCTION:
+		return e.handlePushToProduction(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_MIGRATE_SITE:
+		return e.handleMigrateSite(ctx, payload)
+
+	case wardenv1.JobType_JOB_TYPE_SYNC_CLEANUP_SCRIPT,
+		wardenv1.JobType_JOB_TYPE_RUN_WP_CLI:
+		// These are handled by the heartbeat sync path or direct invocation.
+		log.Printf("[jobs] job type %s not implemented in executor fallback", job.Type)
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
+
 	default:
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED,
 			fmt.Sprintf("unknown job type: %s", job.Type)

@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/credsstore"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/metrics"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/updater"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
@@ -129,6 +130,17 @@ func (r *Reporter) sendHeartbeat(ctx context.Context) {
 	if resp.Msg.Sync != nil && r.onSync != nil {
 		log.Printf("[heartbeat] received config sync directive")
 		r.onSync(resp.Msg.Sync)
+
+		// Store B2 credentials delivered via sync directive.
+		if resp.Msg.Sync.GetB2KeyId() != "" {
+			credsstore.SetB2(credsstore.B2Creds{
+				KeyID:      resp.Msg.Sync.GetB2KeyId(),
+				AppKey:     resp.Msg.Sync.GetB2AppKey(),
+				BucketName: resp.Msg.Sync.GetB2Bucket(),
+			})
+			log.Printf("[heartbeat] B2 credentials updated from sync directive")
+		}
+
 		// Self-update check: apply new binary if version is newer and no jobs running.
 		if lv := resp.Msg.Sync.GetLatestWardenVersion(); lv != "" {
 			activeJobs := 0
