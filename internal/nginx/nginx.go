@@ -20,6 +20,7 @@ func NewManager() *Manager {
 type VhostConfig struct {
 	SiteID       string
 	Domain       string
+	Subdomain    string // e.g. "abc12345.sites.dnsfox.com"; added to server_name when set
 	Username     string
 	DocumentRoot string
 	PHPVersion   string
@@ -34,7 +35,7 @@ const vhostTemplate = `# DNSFox v2 — auto-generated vhost for {{.Domain}}
 server {
     listen 80;
     listen [::]:80;
-    server_name {{.Domain}};
+    server_name {{.Domain}}{{if .Subdomain}} {{.Subdomain}}{{end}};
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -48,7 +49,7 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
-    server_name {{.Domain}};
+    server_name {{.Domain}}{{if .Subdomain}} {{.Subdomain}}{{end}};
 
     ssl_certificate     /etc/ssl/dnsfox/wildcard-sites/fullchain.pem;
     ssl_certificate_key /etc/ssl/dnsfox/wildcard-sites/privkey.pem;
@@ -137,9 +138,10 @@ func (m *Manager) RemoveVhost(siteID string) error {
 
 // ProxyVhostConfig holds the configuration for a Node.js reverse-proxy vhost.
 type ProxyVhostConfig struct {
-	SiteID string
-	Domain string
-	Port   int // localhost port the Node.js process listens on
+	SiteID    string
+	Domain    string
+	Subdomain string // e.g. "abc12345.sites.dnsfox.com"; added to server_name when set
+	Port      int    // localhost port the Node.js process listens on
 }
 
 const proxyVhostTemplate = `# DNSFox v2 — Node.js proxy vhost for {{.Domain}}
@@ -148,7 +150,7 @@ const proxyVhostTemplate = `# DNSFox v2 — Node.js proxy vhost for {{.Domain}}
 server {
     listen 80;
     listen [::]:80;
-    server_name {{.Domain}};
+    server_name {{.Domain}}{{if .Subdomain}} {{.Subdomain}}{{end}};
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -162,7 +164,7 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
-    server_name {{.Domain}};
+    server_name {{.Domain}}{{if .Subdomain}} {{.Subdomain}}{{end}};
 
     ssl_certificate     /etc/ssl/dnsfox/wildcard-sites/fullchain.pem;
     ssl_certificate_key /etc/ssl/dnsfox/wildcard-sites/privkey.pem;

@@ -76,10 +76,12 @@ func (e *Executor) ActiveJobCount() int {
 // ProcessJobs dispatches a batch of jobs received from the heartbeat response.
 // Each job runs in its own goroutine, bounded by maxConcurrentJobs.
 // onComplete is called when each job finishes (success or failure).
+// The fourth argument to onComplete is an optional JSON string of provisioning
+// outputs (subdomain, admin credentials) to be relayed to the API.
 func (e *Executor) ProcessJobs(
 	ctx context.Context,
 	jobs []*wardenv1.AgentJob,
-	onComplete func(jobID string, status wardenv1.ProvisioningStatus, errMsg string),
+	onComplete func(jobID string, status wardenv1.ProvisioningStatus, errMsg string, resultJSON string),
 ) {
 	for _, job := range jobs {
 		e.mu.Lock()
@@ -100,19 +102,21 @@ func (e *Executor) ProcessJobs(
 			}()
 
 			log.Printf("[jobs] starting job %s type %s", j.JobId, j.Type)
-			status, errMsg := e.executeJob(ctx, j)
+			status, errMsg, resultJSON := e.executeJob(ctx, j)
 			log.Printf("[jobs] job %s finished — status %s", j.JobId, status)
 
 			if onComplete != nil {
-				onComplete(j.JobId, status, errMsg)
+				onComplete(j.JobId, status, errMsg, resultJSON)
 			}
 		}(job)
 	}
 }
 
 // executeJob decrypts the payload (if present) and dispatches to the correct handler.
+// Returns (status, errMsg, resultJSON). resultJSON is non-empty only for successful
+// provisioning jobs and carries outputs like subdomain and admin credentials.
 func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
-	wardenv1.ProvisioningStatus, string,
+	wardenv1.ProvisioningStatus, string, string,
 ) {
 	var payload map[string]interface{}
 	if len(job.EncryptedPayload) > 0 {
@@ -125,10 +129,15 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 			p, err := e.decryptPayload(job.EncryptedPayload)
 			if err != nil {
 				return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED,
-					fmt.Sprintf("decrypt payload: %v", err)
+					fmt.Sprintf("decrypt payload: %v", err), ""
 			}
 			payload = p
 		}
+	}
+
+	// wrap2 converts (status, errMsg) handlers to the three-value form.
+	wrap2 := func(status wardenv1.ProvisioningStatus, errMsg string) (wardenv1.ProvisioningStatus, string, string) {
+		return status, errMsg, ""
 	}
 
 	switch job.Type {
@@ -140,71 +149,71 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 		return e.handleProvisionNodeJS(ctx, payload)
 
 	case wardenv1.JobType_JOB_TYPE_DEPROVISION_SITE:
-		return e.handleDeprovisionSiteJob(ctx, payload)
+		return wrap2(e.handleDeprovisionSiteJob(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_BACKUP_SITE:
-		return e.handleBackupSite(ctx, payload)
+		return wrap2(e.handleBackupSite(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_RESTORE_SITE:
-		return e.handleRestoreSite(ctx, payload)
+		return wrap2(e.handleRestoreSite(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_SUSPEND_SITE:
-		return e.handleSuspendSite(ctx, payload)
+		return wrap2(e.handleSuspendSite(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_UNSUSPEND_SITE:
-		return e.handleUnsuspendSite(ctx, payload)
+		return wrap2(e.handleUnsuspendSite(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_SCAN_MALWARE:
-		return e.handleScanMalware(ctx, payload)
+		return wrap2(e.handleScanMalware(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_CHANGE_PHP_VERSION:
-		return e.handleChangePHPVersion(ctx, payload)
+		return wrap2(e.handleChangePHPVersion(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_PURGE_CACHE:
-		return e.handlePurgeCache(ctx, payload)
+		return wrap2(e.handlePurgeCache(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_SYNC_WAF_RULES:
-		return e.handleSyncWafRules(ctx, payload)
+		return wrap2(e.handleSyncWafRules(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_SYNC_MU_PLUGINS:
-		return e.handleSyncMuPlugins(ctx, payload)
+		return wrap2(e.handleSyncMuPlugins(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_RELOAD_NGINX:
-		return e.handleReloadNginx(ctx)
+		return wrap2(e.handleReloadNginx(ctx))
 
 	case wardenv1.JobType_JOB_TYPE_ISSUE_CERTIFICATE:
-		return e.handleIssueCertificate(ctx, payload)
+		return wrap2(e.handleIssueCertificate(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_CLONE_FILES:
-		return e.handleCloneFiles(ctx, payload)
+		return wrap2(e.handleCloneFiles(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_PUSH_TO_PRODUCTION:
-		return e.handlePushToProduction(ctx, payload)
+		return wrap2(e.handlePushToProduction(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_MIGRATE_SITE:
-		return e.handleMigrateSite(ctx, payload)
+		return wrap2(e.handleMigrateSite(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_CONVERT_V1_TO_V2:
-		return e.handleConvertV1ToV2(ctx, payload)
+		return wrap2(e.handleConvertV1ToV2(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_DOCKER_RESTART:
-		return e.handleDockerRestart(ctx, payload)
+		return wrap2(e.handleDockerRestart(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_DOCKER_STOP:
-		return e.handleDockerStop(ctx, payload)
+		return wrap2(e.handleDockerStop(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_DOCKER_LOGS:
-		return e.handleDockerLogs(ctx, payload)
+		return wrap2(e.handleDockerLogs(ctx, payload))
 
 	case wardenv1.JobType_JOB_TYPE_SYNC_CLEANUP_SCRIPT,
 		wardenv1.JobType_JOB_TYPE_RUN_WP_CLI:
 		// These are handled by the heartbeat sync path or direct invocation.
 		log.Printf("[jobs] job type %s not implemented in executor fallback", job.Type)
-		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, "", ""
 
 	default:
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED,
-			fmt.Sprintf("unknown job type: %s", job.Type)
+			fmt.Sprintf("unknown job type: %s", job.Type), ""
 	}
 }
 

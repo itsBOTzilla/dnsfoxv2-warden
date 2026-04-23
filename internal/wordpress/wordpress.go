@@ -100,7 +100,10 @@ func New(cfg *config.Config) *Provisioner {
 //
 // This function is idempotent at the WP core level: if wp-config.php already
 // exists (e.g. after a failed partial run), WP core install is skipped.
-func (p *Provisioner) ProvisionWordPress(ctx context.Context, siteCfg provisioning.SiteConfig, params WPParams) error {
+//
+// Returns the admin password (generated or supplied) so callers can relay it
+// back to the API via result_json.
+func (p *Provisioner) ProvisionWordPress(ctx context.Context, siteCfg provisioning.SiteConfig, params WPParams) (adminPass string, err error) {
 	// Use the same helper as provisioning.go so the username matches what
 	// CreateSystemUser created (15-char cap on the UUID part).
 	username := provisioning.SiteUsername(siteCfg.SiteID)
@@ -108,30 +111,30 @@ func (p *Provisioner) ProvisionWordPress(ctx context.Context, siteCfg provisioni
 	credsPath := fmt.Sprintf("/var/www/%s/.db_credentials", username)
 
 	if err := ensureWPCLI(); err != nil {
-		return fmt.Errorf("wp-cli: %w", err)
+		return "", fmt.Errorf("wp-cli: %w", err)
 	}
 
 	if err := p.downloadCore(docroot); err != nil {
-		return fmt.Errorf("download wp core: %w", err)
+		return "", fmt.Errorf("download wp core: %w", err)
 	}
 
 	dbName, dbUser, dbPass, err := parseDBCreds(credsPath)
 	if err != nil {
-		return fmt.Errorf("read db credentials: %w", err)
+		return "", fmt.Errorf("read db credentials: %w", err)
 	}
 
-	adminPass := params.AdminPassword
+	adminPass = params.AdminPassword
 	if adminPass == "" {
 		adminPass = generatePassword()
 	}
 
 	if err := p.configureWP(docroot, siteCfg, dbName, dbUser, dbPass); err != nil {
-		return fmt.Errorf("configure wp-config: %w", err)
+		return "", fmt.Errorf("configure wp-config: %w", err)
 	}
 
 	if !params.SkipInstall {
 		if err := p.installCore(docroot, siteCfg.Domain, params.AdminEmail, adminPass); err != nil {
-			return fmt.Errorf("wp core install: %w", err)
+			return "", fmt.Errorf("wp core install: %w", err)
 		}
 		log.Printf("[wordpress] core installed for %s", siteCfg.Domain)
 
@@ -154,7 +157,7 @@ func (p *Provisioner) ProvisionWordPress(ctx context.Context, siteCfg provisioni
 	}
 
 	log.Printf("[wordpress] provisioning complete for %s", siteCfg.Domain)
-	return nil
+	return adminPass, nil
 }
 
 // ensureWPCLI checks for WP-CLI at /usr/local/bin/wp and downloads it if absent.

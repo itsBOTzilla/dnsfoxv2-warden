@@ -4,6 +4,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -20,17 +21,34 @@ import (
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 )
 
+// handlerResult carries the provisioning status, error message, and optional
+// result JSON for a completed job. The third field is wired through ProcessJobs
+// into the onComplete callback so the API receives provisioning outputs.
+type handlerResult struct {
+	status     wardenv1.ProvisioningStatus
+	errMsg     string
+	resultJSON string
+}
+
+// jobProvisionResult mirrors executor.provisionResult for heartbeat-path jobs.
+type jobProvisionResult struct {
+	Subdomain     string `json:"subdomain,omitempty"`
+	AdminUser     string `json:"admin_user,omitempty"`
+	AdminEmail    string `json:"admin_email,omitempty"`
+	AdminPassword string `json:"admin_password,omitempty"`
+}
+
 // handleProvisionSite provisions a PHP or WordPress site from a heartbeat job.
 // Accepts both v2 ("instanceId") and legacy ("site_id") payload keys.
 func (e *Executor) handleProvisionSite(ctx context.Context, payload map[string]interface{}) (
-	wardenv1.ProvisioningStatus, string,
+	wardenv1.ProvisioningStatus, string, string,
 ) {
 	siteID, _ := payload["site_id"].(string)
 	if siteID == "" {
 		siteID, _ = payload["instanceId"].(string)
 	}
 	if siteID == "" {
-		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id/instanceId in payload"
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id/instanceId in payload", ""
 	}
 
 	domain, _ := payload["domain"].(string)
@@ -62,31 +80,41 @@ func (e *Executor) handleProvisionSite(ctx context.Context, payload map[string]i
 	log.Printf("[jobs] provision_site job: site=%s domain=%s type=%s plan=%s php=%s",
 		siteID, domain, appType, plan, phpVersion)
 
-	if err := e.prov.ProvisionSite(ctx, cfg); err != nil {
-		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error()
+	provRes, err := e.prov.ProvisionSite(ctx, cfg)
+	if err != nil {
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error(), ""
+	}
+
+	res := jobProvisionResult{
+		Subdomain: provRes.Subdomain,
 	}
 
 	if appType == "wordpress" {
 		wpParams := extractWPParams(payload)
-		if err := e.wpProv.ProvisionWordPress(ctx, cfg, wpParams); err != nil {
-			return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error()
+		adminPass, wpErr := e.wpProv.ProvisionWordPress(ctx, cfg, wpParams)
+		if wpErr != nil {
+			return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, wpErr.Error(), ""
 		}
+		res.AdminUser = "admin"
+		res.AdminEmail = wpParams.AdminEmail
+		res.AdminPassword = adminPass
 	}
 
+	b, _ := json.Marshal(res)
 	log.Printf("[jobs] provision_site done: site=%s", siteID)
-	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
+	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, "", string(b)
 }
 
 // handleProvisionNodeJS provisions a Node.js site from a heartbeat job.
 func (e *Executor) handleProvisionNodeJS(ctx context.Context, payload map[string]interface{}) (
-	wardenv1.ProvisioningStatus, string,
+	wardenv1.ProvisioningStatus, string, string,
 ) {
 	siteID, _ := payload["site_id"].(string)
 	if siteID == "" {
 		siteID, _ = payload["instanceId"].(string)
 	}
 	if siteID == "" {
-		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id/instanceId in payload"
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id/instanceId in payload", ""
 	}
 
 	domain, _ := payload["domain"].(string)
@@ -107,11 +135,11 @@ func (e *Executor) handleProvisionNodeJS(ctx context.Context, payload map[string
 
 	params := extractNodeParams(payload)
 	if err := e.jsProv.ProvisionNodeJS(ctx, cfg, params); err != nil {
-		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error()
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error(), ""
 	}
 
 	log.Printf("[jobs] provision_nodejs done: site=%s", siteID)
-	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
+	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, "", ""
 }
 
 // handleDeprovisionSite tears down a site from a heartbeat job.

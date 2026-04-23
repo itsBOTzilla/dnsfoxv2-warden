@@ -282,21 +282,22 @@ func onJobs(agentJobs []*wardenv1.AgentJob, exec *jobs.Executor, tracker *jobTra
 	for _, j := range agentJobs {
 		log.Printf("[warden] heartbeat job: id=%s type=%s", j.GetJobId(), j.GetType())
 	}
-	exec.ProcessJobs(context.Background(), agentJobs, func(jobID string, status wardenv1.ProvisioningStatus, errMsg string) {
+	exec.ProcessJobs(context.Background(), agentJobs, func(jobID string, status wardenv1.ProvisioningStatus, errMsg string, resultJSON string) {
 		tracker.record(jobID, status, errMsg)
 		// Also report back via ReportJobResult so the API marks agent_jobs
-		// (status, completed_at, error_message) and stops redelivering the job.
+		// (status, completed_at, error_message, result_json) and stops redelivering the job.
 		// Heartbeat-delivered jobs historically only stored their result in
 		// memory here, which is why completed_at was never stamped and why the
 		// Node.js converter saw the same job redelivered on every tick.
-		reportJobResultToAPI(cfg, jobID, status, errMsg)
+		reportJobResultToAPI(cfg, jobID, status, errMsg, resultJSON)
 	})
 }
 
 // reportJobResultToAPI posts a ReportJobResult RPC back to the v2 API so the
 // agent_jobs row is flipped to completed/failed with completed_at=NOW().
+// resultJSON carries provisioning outputs (subdomain, admin credentials) when present.
 // Best-effort — errors are logged, not returned.
-func reportJobResultToAPI(cfg *config.Config, jobID string, status wardenv1.ProvisioningStatus, errMsg string) {
+func reportJobResultToAPI(cfg *config.Config, jobID string, status wardenv1.ProvisioningStatus, errMsg string, resultJSON string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -305,6 +306,7 @@ func reportJobResultToAPI(cfg *config.Config, jobID string, status wardenv1.Prov
 		JobId:        jobID,
 		Status:       status,
 		ErrorMessage: errMsg,
+		ResultJson:   resultJSON,
 	})
 	if token := os.Getenv("WARDEN_AGENT_TOKEN"); token != "" {
 		req.Header().Set("X-Warden-Token", token)

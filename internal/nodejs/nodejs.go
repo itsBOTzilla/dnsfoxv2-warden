@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"text/template"
@@ -142,6 +143,15 @@ func (p *Provisioner) ProvisionNodeJS(ctx context.Context, siteCfg provisioning.
 			}
 		}
 
+		// Run npm install when package.json is present (before build command).
+		pkgJSON := filepath.Join(docroot, "package.json")
+		if _, err := os.Stat(pkgJSON); err == nil {
+			if err := runAsUser(username, docroot, "npm install --production=false"); err != nil {
+				// Non-fatal: log the warning and proceed to the build command.
+				log.Printf("[nodejs] npm install warning for %s: %v", siteCfg.SiteID, err)
+			}
+		}
+
 		if params.BuildCommand != "" {
 			if err := runAsUser(username, docroot, params.BuildCommand); err != nil {
 				return fmt.Errorf("build command: %w", err)
@@ -153,10 +163,18 @@ func (p *Provisioner) ProvisionNodeJS(ctx context.Context, siteCfg provisioning.
 		return fmt.Errorf("write systemd unit: %w", err)
 	}
 
+	// Compute the internal subdomain alias (first 8 chars of site UUID).
+	shortID := siteCfg.SiteID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	subdomain := fmt.Sprintf("%s.sites.dnsfox.com", shortID)
+
 	if err := p.nginx.WriteProxyVhost(nginx.ProxyVhostConfig{
-		SiteID: siteCfg.SiteID,
-		Domain: siteCfg.Domain,
-		Port:   port,
+		SiteID:    siteCfg.SiteID,
+		Domain:    siteCfg.Domain,
+		Subdomain: subdomain,
+		Port:      port,
 	}); err != nil {
 		return fmt.Errorf("write nginx vhost: %w", err)
 	}

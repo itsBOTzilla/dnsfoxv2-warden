@@ -103,7 +103,7 @@ func (e *Executor) HandleMigrateSite(
 		migCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
 		err := e.migrate.MigrateSite(migCtx, r)
-		e.reportResult(jobID, err)
+		e.reportResult(jobID, err, "")
 	}()
 
 	return connect.NewResponse(&wardenv1.MigrateSiteResponse{
@@ -132,6 +132,15 @@ func (e *Executor) HandlePurgeSiteCache(
 	}), nil
 }
 
+// provisionResult is the JSON payload reported back to the API in result_json
+// after a successful provisioning job.
+type provisionResult struct {
+	Subdomain     string `json:"subdomain,omitempty"`
+	AdminUser     string `json:"admin_user,omitempty"`
+	AdminEmail    string `json:"admin_email,omitempty"`
+	AdminPassword string `json:"admin_password,omitempty"`
+}
+
 // runProvision runs the full site provisioning chain and reports the result.
 // When the site already has a PHP pool at a different version, it performs a
 // version switch instead of a full provision. For "nodejs" sites it bypasses
@@ -150,7 +159,7 @@ func (e *Executor) runProvision(jobID string, cfg provisioning.SiteConfig, siteT
 			params.BuildCommand = ""
 		}
 		err := e.jsProv.ProvisionNodeJS(ctx, cfg, params)
-		e.reportResult(jobID, err)
+		e.reportResult(jobID, err, "")
 		return
 	}
 
@@ -160,23 +169,37 @@ func (e *Executor) runProvision(jobID string, cfg provisioning.SiteConfig, siteT
 		// Site exists at a different PHP version — perform in-place switch.
 		log.Printf("[executor] php version switch: site=%s %s → %s", cfg.SiteID, currentVersion, cfg.PHPVersion)
 		err := e.prov.SwitchPHPVersion(ctx, cfg.SiteID, currentVersion, cfg.PHPVersion)
-		e.reportResult(jobID, err)
+		e.reportResult(jobID, err, "")
 		return
 	}
 
 	// Fresh provision.
-	if err := e.prov.ProvisionSite(ctx, cfg); err != nil {
-		e.reportResult(jobID, err)
+	provRes, err := e.prov.ProvisionSite(ctx, cfg)
+	if err != nil {
+		e.reportResult(jobID, err, "")
 		return
 	}
 
-	var err error
+	res := provisionResult{
+		Subdomain: provRes.Subdomain,
+	}
+
 	if siteType == "wordpress" {
 		params := parseWPParams(rawCreds)
-		err = e.wpProv.ProvisionWordPress(ctx, cfg, params)
+		adminPass, wpErr := e.wpProv.ProvisionWordPress(ctx, cfg, params)
+		if wpErr != nil {
+			e.reportResult(jobID, wpErr, "")
+			return
+		}
+		res.AdminUser = "admin"
+		res.AdminEmail = params.AdminEmail
+		res.AdminPassword = adminPass
 	}
-	// "php" — ProvisionSite() is sufficient.
-	e.reportResult(jobID, err)
+
+	// Encode result JSON — ignore marshal error (safe struct, no cycles).
+	b, _ := json.Marshal(res)
+	// "php" — ProvisionSite() is sufficient; result carries subdomain only.
+	e.reportResult(jobID, nil, string(b))
 }
 
 // runDeprovision tears down a site and reports the result.
@@ -193,11 +216,13 @@ func (e *Executor) runDeprovision(jobID, siteID string) {
 	} else {
 		err = e.prov.DeprovisionSite(ctx, siteID, phpVersion)
 	}
-	e.reportResult(jobID, err)
+	e.reportResult(jobID, err, "")
 }
 
 // reportResult sends the final job status back to the v2 API.
-func (e *Executor) reportResult(jobID string, jobErr error) {
+// resultJSON is an optional JSON string included in the ReportJobResult payload
+// so callers (API) can extract provisioning outputs such as admin password and subdomain.
+func (e *Executor) reportResult(jobID string, jobErr error, resultJSON string) {
 	status := wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE
 	errMsg := ""
 	if jobErr != nil {
@@ -216,6 +241,7 @@ func (e *Executor) reportResult(jobID string, jobErr error) {
 		JobId:        jobID,
 		Status:       status,
 		ErrorMessage: errMsg,
+		ResultJson:   resultJSON,
 	})
 	if token := os.Getenv("WARDEN_AGENT_TOKEN"); token != "" {
 		req.Header().Set("X-Warden-Token", token)

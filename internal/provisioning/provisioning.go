@@ -14,6 +14,11 @@ import (
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/phpfpm"
 )
 
+// ProvisionResult carries data returned to the API after a successful ProvisionSite call.
+type ProvisionResult struct {
+	Subdomain string // e.g. "abc12345.sites.dnsfox.com"
+}
+
 // SiteConfig holds everything needed to provision a site.
 type SiteConfig struct {
 	SiteID     string
@@ -50,25 +55,32 @@ func NewProvisioner() *Provisioner {
 // ProvisionSite creates a fully isolated hosting environment for a site.
 // DNS record insertion is handled by the API caller after this returns — the warden
 // has no DB access on edge nodes. The API inserts into dns_records for the dnsfox.com zone.
-func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
+func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) (ProvisionResult, error) {
 	log.Printf("provisioning site %s domain %s plan %s", cfg.SiteID, cfg.Domain, cfg.Plan)
 
 	username := siteUsername(cfg.SiteID)
 	docroot := fmt.Sprintf("/var/www/%s/public", username)
 
+	// Compute the internal subdomain from the first 8 chars of the site UUID.
+	shortID := cfg.SiteID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	subdomain := fmt.Sprintf("%s.sites.dnsfox.com", shortID)
+
 	// Step 1: create Linux system user
 	if err := createSystemUser(username); err != nil {
-		return fmt.Errorf("create user: %w", err)
+		return ProvisionResult{}, fmt.Errorf("create user: %w", err)
 	}
 	// nginx worker runs as www-data; add it to the site group so it can read the docroot (mode 750).
 	if err := addToGroup(username, "www-data"); err != nil {
-		return fmt.Errorf("add www-data to group: %w", err)
+		return ProvisionResult{}, fmt.Errorf("add www-data to group: %w", err)
 	}
 	log.Printf("created user %s", username)
 
 	// Step 2: create document root
 	if err := createDocumentRoot(docroot, username); err != nil {
-		return fmt.Errorf("create docroot: %w", err)
+		return ProvisionResult{}, fmt.Errorf("create docroot: %w", err)
 	}
 	log.Printf("created docroot %s", docroot)
 
@@ -82,10 +94,10 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 		MaxChildren: planMaxChildren(cfg.Plan),
 	}
 	if err := phpfpm.WriteSiteConfig(pool); err != nil {
-		return fmt.Errorf("write phpfpm site config: %w", err)
+		return ProvisionResult{}, fmt.Errorf("write phpfpm site config: %w", err)
 	}
 	if err := phpfpm.WriteServiceUnit(pool); err != nil {
-		return fmt.Errorf("write phpfpm service unit: %w", err)
+		return ProvisionResult{}, fmt.Errorf("write phpfpm service unit: %w", err)
 	}
 	log.Printf("wrote php-fpm site config and service for %s", cfg.SiteID)
 
@@ -93,14 +105,15 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 	vhost := nginx.VhostConfig{
 		SiteID:       cfg.SiteID,
 		Domain:       cfg.Domain,
+		Subdomain:    subdomain,
 		Username:     username,
 		DocumentRoot: docroot,
 		PHPVersion:   cfg.PHPVersion,
 	}
 	if err := p.Nginx.WriteVhost(vhost); err != nil {
-		return fmt.Errorf("write nginx vhost: %w", err)
+		return ProvisionResult{}, fmt.Errorf("write nginx vhost: %w", err)
 	}
-	log.Printf("wrote nginx vhost for %s", cfg.Domain)
+	log.Printf("wrote nginx vhost for %s (subdomain: %s)", cfg.Domain, subdomain)
 
 	// Step 5: apply cgroup v2 resource limits via systemd slice
 	limits, ok := PlanLimits[cfg.Plan]
@@ -108,13 +121,13 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 		limits = PlanLimits["fox"]
 	}
 	if err := p.Cgroups.ApplyLimits(cfg.SiteID, username, limits); err != nil {
-		return fmt.Errorf("apply cgroup limits: %w", err)
+		return ProvisionResult{}, fmt.Errorf("apply cgroup limits: %w", err)
 	}
 	log.Printf("applied cgroup limits for %s plan %s", cfg.SiteID, cfg.Plan)
 
 	// Step 6: create MariaDB database and user
 	if err := p.MariaDB.CreateSiteDatabase(cfg.SiteID, username); err != nil {
-		return fmt.Errorf("create mariadb database: %w", err)
+		return ProvisionResult{}, fmt.Errorf("create mariadb database: %w", err)
 	}
 	log.Printf("created mariadb database for %s", cfg.SiteID)
 
@@ -123,22 +136,22 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 	svcName := phpfpm.ServiceUnitName(cfg.SiteID)
 	exec.Command("systemctl", "daemon-reload").Run() //nolint:errcheck
 	if out, err := exec.Command("systemctl", "enable", "--now", svcName).CombinedOutput(); err != nil {
-		return fmt.Errorf("start phpfpm service %s: %s: %w", svcName, out, err)
+		return ProvisionResult{}, fmt.Errorf("start phpfpm service %s: %s: %w", svcName, out, err)
 	}
 	socketPath := fmt.Sprintf("/run/php/%s.sock", username)
 	if err := waitForSocket(socketPath, 20); err != nil {
-		return fmt.Errorf("phpfpm socket not ready: %w", err)
+		return ProvisionResult{}, fmt.Errorf("phpfpm socket not ready: %w", err)
 	}
 	log.Printf("php-fpm service started, socket ready at %s", socketPath)
 
 	// Step 8: reload Nginx
 	if err := reloadNginx(); err != nil {
-		return fmt.Errorf("reload nginx: %w", err)
+		return ProvisionResult{}, fmt.Errorf("reload nginx: %w", err)
 	}
 	log.Printf("started php-fpm service and reloaded nginx")
 
 	log.Printf("provisioning complete for site %s", cfg.SiteID)
-	return nil
+	return ProvisionResult{Subdomain: subdomain}, nil
 }
 
 // SwitchPHPVersion migrates a site from one PHP version to another without
