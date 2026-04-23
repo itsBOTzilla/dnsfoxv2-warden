@@ -138,8 +138,15 @@ func (e *Executor) runProvision(jobID string, cfg provisioning.SiteConfig, siteT
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	if siteType == "nodejs" {
+	if siteType == "nodejs" || siteType == "html" {
 		params := parseNodeParams(rawCreds)
+		if siteType == "html" {
+			// Static sites run /usr/bin/serve inside the cgroup slice.
+			// Customer uploads files to public/; serve handles SPA routing.
+			params.IsStatic = true
+			params.StartCommand = ""
+			params.BuildCommand = ""
+		}
 		err := e.jsProv.ProvisionNodeJS(ctx, cfg, params)
 		e.reportResult(jobID, err)
 		return

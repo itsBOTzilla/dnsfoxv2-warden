@@ -67,6 +67,9 @@ type NodeParams struct {
 	GitRepoURL string `json:"git_repo_url"`
 	// GitBranch defaults to "main" when empty.
 	GitBranch string `json:"git_branch"`
+	// IsStatic marks this as a static HTML/SPA site. The provisioner runs
+	// /usr/bin/serve public -s -p PORT inside the cgroup slice instead of node.
+	IsStatic bool `json:"is_static"`
 }
 
 // Provisioner provisions Node.js sites on the host.
@@ -132,15 +135,17 @@ func (p *Provisioner) ProvisionNodeJS(ctx context.Context, siteCfg provisioning.
 		return fmt.Errorf("write env file: %w", err)
 	}
 
-	if params.GitRepoURL != "" {
-		if err := cloneRepo(ctx, params.GitRepoURL, params.GitBranch, docroot, username); err != nil {
-			return fmt.Errorf("git clone: %w", err)
+	if !params.IsStatic {
+		if params.GitRepoURL != "" {
+			if err := cloneRepo(ctx, params.GitRepoURL, params.GitBranch, docroot, username); err != nil {
+				return fmt.Errorf("git clone: %w", err)
+			}
 		}
-	}
 
-	if params.BuildCommand != "" {
-		if err := runAsUser(username, docroot, params.BuildCommand); err != nil {
-			return fmt.Errorf("build command: %w", err)
+		if params.BuildCommand != "" {
+			if err := runAsUser(username, docroot, params.BuildCommand); err != nil {
+				return fmt.Errorf("build command: %w", err)
+			}
 		}
 	}
 
@@ -217,9 +222,11 @@ func (p *Provisioner) writeEnvFile(username string, siteCfg provisioning.SiteCon
 	return os.WriteFile(path, []byte(sb.String()), 0600)
 }
 
-// systemdUnitTemplate defines the systemd service for a Node.js app.
+// systemdUnitTemplate defines the systemd service for a Node.js or static site.
+// ExecStart is the full command — either "/usr/bin/node server.js" for Node.js
+// or "/usr/bin/serve public -s -p PORT" for static HTML sites.
 const systemdUnitTemplate = `[Unit]
-Description=DNSFox v2 Node.js site {{.SiteID}}
+Description=DNSFox v2 site {{.SiteID}}
 After=network.target
 
 [Service]
@@ -228,7 +235,7 @@ User={{.Username}}
 Group={{.Username}}
 WorkingDirectory={{.Docroot}}
 EnvironmentFile=/var/www/{{.Username}}/.env
-ExecStart=/usr/bin/node {{.StartCmd}}
+ExecStart={{.ExecStart}}
 Restart=always
 RestartSec=5
 Slice=dnsfox-site-{{.SiteID}}.slice
@@ -238,19 +245,26 @@ WantedBy=multi-user.target
 `
 
 type unitData struct {
-	SiteID   string
-	Username string
-	Docroot  string
-	StartCmd string
+	SiteID    string
+	Username  string
+	Docroot   string
+	ExecStart string
 }
 
-// writeSystemdUnit writes and enables a systemd service unit for the Node.js app.
+// writeSystemdUnit writes a systemd service unit for a Node.js app or static site.
+// For Node.js: ExecStart = /usr/bin/node <StartCommand>
+// For static (IsStatic=true): ExecStart = /usr/bin/serve public -s -p <port>
 func (p *Provisioner) writeSystemdUnit(siteID, username, docroot string, params NodeParams, port int) error {
-	startCmd := params.StartCommand
-	if startCmd == "" {
-		startCmd = "server.js"
+	var execStart string
+	if params.IsStatic {
+		execStart = fmt.Sprintf("/usr/bin/serve public -s -p %d", port)
+	} else {
+		startCmd := params.StartCommand
+		if startCmd == "" {
+			startCmd = "server.js"
+		}
+		execStart = "/usr/bin/node " + startCmd
 	}
-	_ = port
 
 	tmpl, err := template.New("unit").Parse(systemdUnitTemplate)
 	if err != nil {
@@ -265,10 +279,10 @@ func (p *Provisioner) writeSystemdUnit(siteID, username, docroot string, params 
 	defer f.Close()
 
 	return tmpl.Execute(f, unitData{
-		SiteID:   siteID,
-		Username: username,
-		Docroot:  docroot,
-		StartCmd: startCmd,
+		SiteID:    siteID,
+		Username:  username,
+		Docroot:   docroot,
+		ExecStart: execStart,
 	})
 }
 
