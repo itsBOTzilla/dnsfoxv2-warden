@@ -11,9 +11,11 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -244,9 +246,31 @@ func parseNodeParams(raw []byte) nodejs.NodeParams {
 	return p
 }
 
-// detectPHPVersion scans pool config locations to find which PHP version a site uses.
-// Returns empty string when no pool config is found (indicates a non-PHP site).
+// detectPHPVersion scans config locations to find which PHP version a site uses.
+// Checks the new per-site standalone service unit first, then legacy pool configs.
+// Returns empty string when no config is found (indicates a non-PHP / Node.js site).
 func detectPHPVersion(siteID string) string {
+	// New model: per-site standalone service unit at /etc/systemd/system/dnsfox-phpfpm-{id}.service.
+	// The ExecStart line encodes the PHP binary path: /usr/sbin/php-fpmX.Y or /usr/local/phpX.Y/...
+	unitPath := fmt.Sprintf("/etc/systemd/system/dnsfox-phpfpm-%s.service", siteID)
+	if data, err := os.ReadFile(unitPath); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if !strings.HasPrefix(line, "ExecStart=") {
+				continue
+			}
+			// /usr/sbin/php-fpm8.3 → "8.3"
+			// /usr/local/php8.3/sbin/php-fpm → "8.3"
+			for _, v := range []string{"8.5", "8.4", "8.3", "8.2", "8.1"} {
+				if strings.Contains(line, v) {
+					return v
+				}
+			}
+		}
+		// Service unit exists but version not parseable — treat as PHP (8.3 default).
+		return "8.3"
+	}
+
+	// Legacy model: global pool config files.
 	candidates := []struct {
 		version string
 		path    string

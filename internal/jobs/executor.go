@@ -20,6 +20,9 @@ import (
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/nginx"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/nodejs"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/wordpress"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 )
 
@@ -30,6 +33,9 @@ type Executor struct {
 	cfg           *config.Config
 	encryptionKey []byte // AES-256; nil = no decryption attempted
 	nginx         *nginx.Manager
+	prov          *provisioning.Provisioner
+	wpProv        *wordpress.Provisioner
+	jsProv        *nodejs.Provisioner
 	semaphore     chan struct{}
 	mu            sync.Mutex
 	activeJobs    map[string]bool
@@ -49,11 +55,14 @@ func NewExecutor(cfg *config.Config) *Executor {
 		}
 	}
 	return &Executor{
-		cfg:        cfg,
+		cfg:           cfg,
 		encryptionKey: key,
-		nginx:      nginx.NewManager(),
-		semaphore:  make(chan struct{}, maxConcurrentJobs),
-		activeJobs: make(map[string]bool),
+		nginx:         nginx.NewManager(),
+		prov:          provisioning.NewProvisioner(),
+		wpProv:        wordpress.New(cfg),
+		jsProv:        nodejs.New(cfg),
+		semaphore:     make(chan struct{}, maxConcurrentJobs),
+		activeJobs:    make(map[string]bool),
 	}
 }
 

@@ -14,46 +14,170 @@ import (
 	"strings"
 	"time"
 
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/nodejs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/wordpress"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 )
 
-// handleProvisionSite is a fallback for heartbeat-delivered provisioning jobs.
-// The primary path is the direct gRPC ProvisionSite RPC.
-func (e *Executor) handleProvisionSite(_ context.Context, payload map[string]interface{}) (
+// handleProvisionSite provisions a PHP or WordPress site from a heartbeat job.
+// Accepts both v2 ("instanceId") and legacy ("site_id") payload keys.
+func (e *Executor) handleProvisionSite(ctx context.Context, payload map[string]interface{}) (
 	wardenv1.ProvisioningStatus, string,
 ) {
 	siteID, _ := payload["site_id"].(string)
 	if siteID == "" {
-		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id in payload"
+		siteID, _ = payload["instanceId"].(string)
 	}
-	log.Printf("[jobs] provision site %s (heartbeat fallback — primary path is gRPC)", siteID)
+	if siteID == "" {
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id/instanceId in payload"
+	}
+
+	domain, _ := payload["domain"].(string)
+	plan, _ := payload["plan"].(string)
+	if plan == "" {
+		plan = "fox"
+	}
+	phpVersion, _ := payload["phpVersion"].(string)
+	if phpVersion == "" {
+		phpVersion, _ = payload["php_version"].(string)
+	}
+	if phpVersion == "" {
+		phpVersion = "8.3"
+	}
+	appType, _ := payload["appType"].(string)
+	if appType == "" {
+		appType, _ = payload["app_type"].(string)
+	}
+	customerID, _ := payload["customerId"].(string)
+
+	cfg := provisioning.SiteConfig{
+		SiteID:     siteID,
+		Domain:     domain,
+		CustomerID: customerID,
+		PHPVersion: phpVersion,
+		Plan:       plan,
+	}
+
+	log.Printf("[jobs] provision_site job: site=%s domain=%s type=%s plan=%s php=%s",
+		siteID, domain, appType, plan, phpVersion)
+
+	if err := e.prov.ProvisionSite(ctx, cfg); err != nil {
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error()
+	}
+
+	if appType == "wordpress" {
+		wpParams := extractWPParams(payload)
+		if err := e.wpProv.ProvisionWordPress(ctx, cfg, wpParams); err != nil {
+			return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error()
+		}
+	}
+
+	log.Printf("[jobs] provision_site done: site=%s", siteID)
 	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
 }
 
-// handleProvisionNodeJS is a fallback for heartbeat-delivered Node.js provisioning jobs.
-func (e *Executor) handleProvisionNodeJS(_ context.Context, payload map[string]interface{}) (
+// handleProvisionNodeJS provisions a Node.js site from a heartbeat job.
+func (e *Executor) handleProvisionNodeJS(ctx context.Context, payload map[string]interface{}) (
 	wardenv1.ProvisioningStatus, string,
 ) {
 	siteID, _ := payload["site_id"].(string)
 	if siteID == "" {
-		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id in payload"
+		siteID, _ = payload["instanceId"].(string)
 	}
-	log.Printf("[jobs] provision nodejs %s (heartbeat fallback — primary path is gRPC)", siteID)
+	if siteID == "" {
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id/instanceId in payload"
+	}
+
+	domain, _ := payload["domain"].(string)
+	plan, _ := payload["plan"].(string)
+	if plan == "" {
+		plan = "fox"
+	}
+	customerID, _ := payload["customerId"].(string)
+
+	cfg := provisioning.SiteConfig{
+		SiteID:     siteID,
+		Domain:     domain,
+		CustomerID: customerID,
+		Plan:       plan,
+	}
+
+	log.Printf("[jobs] provision_nodejs job: site=%s domain=%s plan=%s", siteID, domain, plan)
+
+	params := extractNodeParams(payload)
+	if err := e.jsProv.ProvisionNodeJS(ctx, cfg, params); err != nil {
+		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error()
+	}
+
+	log.Printf("[jobs] provision_nodejs done: site=%s", siteID)
 	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
 }
 
-// handleDeprovisionSite is a fallback for heartbeat-delivered deprovision jobs.
+// handleDeprovisionSite tears down a site from a heartbeat job.
 func (e *Executor) handleDeprovisionSite(_ context.Context, payload map[string]interface{}) (
 	wardenv1.ProvisioningStatus, string,
 ) {
 	siteID, _ := payload["site_id"].(string)
 	if siteID == "" {
+		siteID, _ = payload["instanceId"].(string)
+	}
+	if siteID == "" {
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id in payload"
 	}
 	log.Printf("[jobs] deprovision site %s (heartbeat fallback — primary path is gRPC)", siteID)
 	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
+}
+
+// extractWPParams pulls WordPress provisioning parameters from the job payload.
+func extractWPParams(payload map[string]interface{}) wordpress.WPParams {
+	email, _ := payload["adminEmail"].(string)
+	if email == "" {
+		email, _ = payload["admin_email"].(string)
+	}
+	password, _ := payload["adminPassword"].(string)
+	if password == "" {
+		password, _ = payload["admin_password"].(string)
+	}
+	title, _ := payload["wordpressTitle"].(string)
+	if title == "" {
+		title, _ = payload["site_title"].(string)
+	}
+	return wordpress.WPParams{
+		AdminEmail:    email,
+		AdminPassword: password,
+		SiteTitle:     title,
+	}
+}
+
+// extractNodeParams pulls Node.js provisioning parameters from the job payload.
+func extractNodeParams(payload map[string]interface{}) nodejs.NodeParams {
+	var p nodejs.NodeParams
+	p.StartCommand, _ = payload["startCommand"].(string)
+	if p.StartCommand == "" {
+		p.StartCommand, _ = payload["start_command"].(string)
+	}
+	p.BuildCommand, _ = payload["buildCommand"].(string)
+	if p.BuildCommand == "" {
+		p.BuildCommand, _ = payload["build_command"].(string)
+	}
+	p.GitRepoURL, _ = payload["repoUrl"].(string)
+	if p.GitRepoURL == "" {
+		p.GitRepoURL, _ = payload["git_repo_url"].(string)
+	}
+	p.GitBranch, _ = payload["gitBranch"].(string)
+	if payload["isStatic"] == true || payload["appType"] == "html" {
+		p.IsStatic = true
+	}
+	if ev, ok := payload["envVars"].(map[string]interface{}); ok {
+		p.EnvVars = make(map[string]string, len(ev))
+		for k, v := range ev {
+			if s, ok := v.(string); ok {
+				p.EnvVars[k] = s
+			}
+		}
+	}
+	return p
 }
 
 // handlePurgeCache clears the nginx cache for the site specified in the payload.
