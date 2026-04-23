@@ -80,10 +80,12 @@ type serviceUnitData struct {
 const siteConfigDir = "/etc/dnsfox/phpfpm"
 
 // phpFPMBin returns the path to the php-fpm binary for a given version.
-// PHP 8.4 is installed via apt; all others are compiled from source.
+// Checks apt-installed path first (/usr/sbin/php-fpm{v}); falls back to
+// compiled-from-source (/usr/local/php{v}/sbin/php-fpm).
 func phpFPMBin(phpVersion string) string {
-	if phpVersion == "8.4" {
-		return "/usr/sbin/php-fpm8.4"
+	aptPath := fmt.Sprintf("/usr/sbin/php-fpm%s", phpVersion)
+	if _, err := os.Stat(aptPath); err == nil {
+		return aptPath
 	}
 	return fmt.Sprintf("/usr/local/php%s/sbin/php-fpm", phpVersion)
 }
