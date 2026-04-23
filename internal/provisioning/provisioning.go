@@ -72,17 +72,22 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 	}
 	log.Printf("created docroot %s", docroot)
 
-	// Step 3: write PHP-FPM pool config
+	// Step 3: write per-site standalone PHP-FPM config + systemd service.
+	// The service runs inside the site's cgroup slice so all workers it spawns
+	// are automatically placed in the correct cgroup — no PID-moving needed.
 	pool := phpfpm.PoolConfig{
 		SiteID:      cfg.SiteID,
 		Username:    username,
 		PHPVersion:  cfg.PHPVersion,
 		MaxChildren: planMaxChildren(cfg.Plan),
 	}
-	if err := phpfpm.WritePoolConfig(pool); err != nil {
-		return fmt.Errorf("write phpfpm pool: %w", err)
+	if err := phpfpm.WriteSiteConfig(pool); err != nil {
+		return fmt.Errorf("write phpfpm site config: %w", err)
 	}
-	log.Printf("wrote php-fpm pool for %s", cfg.SiteID)
+	if err := phpfpm.WriteServiceUnit(pool); err != nil {
+		return fmt.Errorf("write phpfpm service unit: %w", err)
+	}
+	log.Printf("wrote php-fpm site config and service for %s", cfg.SiteID)
 
 	// Step 4: write Nginx vhost config (includes nginx -t validation)
 	vhost := nginx.VhostConfig{
@@ -113,28 +118,24 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 	}
 	log.Printf("created mariadb database for %s", cfg.SiteID)
 
-	// Step 7: reload PHP-FPM
-	if err := reloadPHPFPM(cfg.PHPVersion); err != nil {
-		return fmt.Errorf("reload phpfpm: %w", err)
+	// Step 7: start per-site PHP-FPM service (daemon-reload already done by ApplyLimits).
+	// Workers spawned by this service inherit the cgroup slice automatically.
+	svcName := phpfpm.ServiceUnitName(cfg.SiteID)
+	exec.Command("systemctl", "daemon-reload").Run() //nolint:errcheck
+	if out, err := exec.Command("systemctl", "enable", "--now", svcName).CombinedOutput(); err != nil {
+		return fmt.Errorf("start phpfpm service %s: %s: %w", svcName, out, err)
 	}
-	// Wait for the PHP-FPM socket to appear before reloading nginx and assigning cgroups.
 	socketPath := fmt.Sprintf("/run/php/%s.sock", username)
 	if err := waitForSocket(socketPath, 20); err != nil {
 		return fmt.Errorf("phpfpm socket not ready: %w", err)
 	}
-	log.Printf("php-fpm socket ready at %s", socketPath)
+	log.Printf("php-fpm service started, socket ready at %s", socketPath)
 
-	// Step 8: assign PHP-FPM workers to site's cgroup slice
-	if err := p.Cgroups.AssignWorkers(cfg.SiteID, username); err != nil {
-		// Non-fatal: ondemand pools may have no workers until first request.
-		log.Printf("warn: assign cgroup workers for %s: %v", cfg.SiteID, err)
-	}
-
-	// Step 9: reload Nginx
+	// Step 8: reload Nginx
 	if err := reloadNginx(); err != nil {
 		return fmt.Errorf("reload nginx: %w", err)
 	}
-	log.Printf("reloaded php-fpm and nginx")
+	log.Printf("started php-fpm service and reloaded nginx")
 
 	log.Printf("provisioning complete for site %s", cfg.SiteID)
 	return nil
@@ -143,50 +144,50 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) error {
 // SwitchPHPVersion migrates a site from one PHP version to another without
 // touching MariaDB, cgroups, nginx vhost, or the docroot.
 // The socket path (/run/php/{username}.sock) is version-agnostic so nginx
-// needs no changes — only the PHP-FPM pool config changes.
+// needs no changes — only the PHP-FPM service changes.
 //
 // Steps:
-//  1. Write pool config for the new version
-//  2. Reload new PHP-FPM service (starts managing the pool)
-//  3. Wait for the socket to be ready
-//  4. Remove pool config from the old version
-//  5. Reload old PHP-FPM (stops managing the pool gracefully)
-//  6. Re-assign PHP-FPM workers to the cgroup slice
+//  1. Write new standalone php-fpm config + service unit for toVersion
+//  2. Stop old per-site service (or global pool if legacy)
+//  3. Start new per-site service
+//  4. Wait for socket
+//  5. Clean up any legacy global pool configs
 func (p *Provisioner) SwitchPHPVersion(ctx context.Context, siteID, fromVersion, toVersion string) error {
 	log.Printf("[provisioning] switch php %s → %s for site %s", fromVersion, toVersion, siteID)
 	username := siteUsername(siteID)
 
 	pool := phpfpm.PoolConfig{
-		SiteID:     siteID,
-		Username:   username,
-		PHPVersion: toVersion,
-		MaxChildren: planMaxChildren("fox"), // will be re-applied by cgroups; use conservative default
+		SiteID:      siteID,
+		Username:    username,
+		PHPVersion:  toVersion,
+		MaxChildren: planMaxChildren("fox"),
 	}
-	if err := phpfpm.WritePoolConfig(pool); err != nil {
-		return fmt.Errorf("write pool config for %s: %w", toVersion, err)
+
+	// Write new config and service unit for the target version.
+	if err := phpfpm.WriteSiteConfig(pool); err != nil {
+		return fmt.Errorf("write site config for php%s: %w", toVersion, err)
 	}
-	if err := reloadPHPFPM(toVersion); err != nil {
-		return fmt.Errorf("reload php%s-fpm: %w", toVersion, err)
+	if err := phpfpm.WriteServiceUnit(pool); err != nil {
+		return fmt.Errorf("write service unit for php%s: %w", toVersion, err)
 	}
+
+	// Stop the old per-site service if it exists (it may be named with fromVersion but
+	// ServiceUnitName is version-agnostic — same unit file, just with updated ExecStart).
+	// Since we overwrote the unit, we just restart it.
+	svcName := phpfpm.ServiceUnitName(siteID)
+	exec.Command("systemctl", "daemon-reload").Run()                 //nolint:errcheck
+	exec.Command("systemctl", "restart", svcName).Run()              //nolint:errcheck
 
 	socketPath := fmt.Sprintf("/run/php/%s.sock", username)
 	if err := waitForSocket(socketPath, 20); err != nil {
 		return fmt.Errorf("socket not ready after switching to php%s: %w", toVersion, err)
 	}
 
-	// Remove old pool config and reload to cleanly stop old FPM workers.
-	if err := phpfpm.RemovePoolConfig(siteID); err != nil {
-		log.Printf("[provisioning] warn: remove old pool config: %v", err)
-	}
-	// Re-write the new config (RemovePoolConfig removed all versions).
-	if err := phpfpm.WritePoolConfig(pool); err != nil {
-		return fmt.Errorf("re-write pool config for %s: %w", toVersion, err)
-	}
-	reloadPHPFPM(fromVersion) //nolint:errcheck — gracefully stop old workers
-
-	// Re-assign PHP-FPM workers to the cgroup slice.
-	if err := p.Cgroups.AssignWorkers(siteID, username); err != nil {
-		log.Printf("[provisioning] warn: reassign cgroup workers after php switch: %v", err)
+	// Clean up any legacy global-pool configs and reload the global master gracefully.
+	if oldVersion := phpfpm.DetectPoolVersion(siteID); oldVersion != "" {
+		phpfpm.RemovePoolConfig(siteID)                             //nolint:errcheck
+		phpfpm.ReloadGlobalMaster(oldVersion)                      //nolint:errcheck
+		log.Printf("[provisioning] removed legacy global pool config for site %s", siteID)
 	}
 
 	log.Printf("[provisioning] php switch complete: site %s now on php%s", siteID, toVersion)
@@ -198,9 +199,16 @@ func (p *Provisioner) DeprovisionSite(ctx context.Context, siteID, phpVersion st
 	log.Printf("deprovisioning site %s", siteID)
 	username := siteUsername(siteID)
 
+	// Stop and remove per-site PHP-FPM service (new model).
+	_ = phpfpm.RemoveServiceUnit(siteID)
+	_ = phpfpm.RemoveSiteConfig(siteID)
+	// Also clean up any legacy global-pool configs.
 	_ = phpfpm.RemovePoolConfig(siteID)
+	if phpVersion != "" {
+		_ = phpfpm.ReloadGlobalMaster(phpVersion)
+	}
+
 	_ = p.Nginx.RemoveVhost(siteID)
-	_ = reloadPHPFPM(phpVersion)
 	_ = reloadNginx()
 	_ = p.Cgroups.RemoveLimits(siteID)
 	_ = p.MariaDB.DropSiteDatabase(siteID, username)
@@ -237,15 +245,6 @@ func planMaxChildren(plan string) int {
 	default:
 		return 5
 	}
-}
-
-// phpServiceName returns the systemd service name for a given PHP version.
-// PHP 8.4 is installed via apt; all others are compiled from source.
-func phpServiceName(version string) string {
-	if version == "8.4" {
-		return "php8.4-fpm"
-	}
-	return fmt.Sprintf("php%s-fpm-dnsfox", version)
 }
 
 // CreateSystemUser creates a locked system user with no login shell.
@@ -321,11 +320,6 @@ func createDocumentRoot(docroot, username string) error {
 // removeSystemUser deletes the system user.
 func removeSystemUser(username string) error {
 	return exec.Command("userdel", "-r", username).Run()
-}
-
-// reloadPHPFPM sends a reload signal to the PHP-FPM service for a given version.
-func reloadPHPFPM(phpVersion string) error {
-	return exec.Command("systemctl", "reload", phpServiceName(phpVersion)).Run()
 }
 
 // ReloadNginx sends a reload signal to Nginx.

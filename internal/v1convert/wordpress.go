@@ -190,21 +190,28 @@ func (c *Converter) ConvertWordPressSite(ctx context.Context, req WordPressReque
 		return nil, fmt.Errorf("rewrite wp-config: %w", err)
 	}
 
-	// 12. PHP-FPM pool + nginx vhost.
-	if err := phpfpm.WritePoolConfig(phpfpm.PoolConfig{
+	// 12. Per-site PHP-FPM service + nginx vhost.
+	pool := phpfpm.PoolConfig{
 		SiteID:      req.SiteID,
 		Username:    username,
 		PHPVersion:  req.PHPVersion,
 		MaxChildren: 5,
-	}); err != nil {
-		_ = unpauseContainer(ctx, webName)
-		_ = unpauseContainer(ctx, dbName)
-		return nil, fmt.Errorf("write phpfpm pool: %w", err)
 	}
-	if err := reloadPHPFPMVersion(ctx, req.PHPVersion); err != nil {
+	if err := phpfpm.WriteSiteConfig(pool); err != nil {
 		_ = unpauseContainer(ctx, webName)
 		_ = unpauseContainer(ctx, dbName)
-		return nil, fmt.Errorf("reload php-fpm: %w", err)
+		return nil, fmt.Errorf("write phpfpm site config: %w", err)
+	}
+	if err := phpfpm.WriteServiceUnit(pool); err != nil {
+		_ = unpauseContainer(ctx, webName)
+		_ = unpauseContainer(ctx, dbName)
+		return nil, fmt.Errorf("write phpfpm service unit: %w", err)
+	}
+	_, _ = runCmd(ctx, "systemctl", "daemon-reload")
+	if _, err := runCmd(ctx, "systemctl", "enable", "--now", phpfpm.ServiceUnitName(req.SiteID)); err != nil {
+		_ = unpauseContainer(ctx, webName)
+		_ = unpauseContainer(ctx, dbName)
+		return nil, fmt.Errorf("start phpfpm service: %w", err)
 	}
 	socketPath := fmt.Sprintf("/run/php/%s.sock", username)
 	if err := waitForFile(socketPath, 30); err != nil {
@@ -279,13 +286,15 @@ func (c *Converter) RollbackWordPress(ctx context.Context, req WordPressRequest)
 	username := provisioning.SiteUsername(req.SiteID)
 	log.Printf("[v1convert] rollback wordpress site=%s", req.SiteID)
 
-	// Remove v2 pool + vhost.
+	// Remove v2 per-site php-fpm service + legacy pool configs + vhost.
+	_ = phpfpm.RemoveServiceUnit(req.SiteID)
+	_ = phpfpm.RemoveSiteConfig(req.SiteID)
 	_ = phpfpm.RemovePoolConfig(req.SiteID)
+	if req.PHPVersion != "" {
+		_ = phpfpm.ReloadGlobalMaster(req.PHPVersion)
+	}
 	ng := nginx.NewManager()
 	_ = ng.RemoveVhost(req.SiteID)
-	if req.PHPVersion != "" {
-		_ = reloadPHPFPMVersion(ctx, req.PHPVersion)
-	}
 	_, _ = runCmd(ctx, "systemctl", "reload", "nginx")
 
 	// Drop v2 DB.

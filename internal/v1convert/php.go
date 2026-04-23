@@ -204,25 +204,35 @@ func (c *Converter) ConvertPHPSite(ctx context.Context, req PHPRequest) (*PHPRes
 		log.Printf("[v1convert] sql imported into %s", creds.Name)
 	}
 
-	// 11. PHP-FPM pool + nginx vhost.
-	if err := phpfpm.WritePoolConfig(phpfpm.PoolConfig{
+	// 11. Per-site PHP-FPM service + nginx vhost.
+	// Write standalone config + systemd unit so all workers run inside the site cgroup.
+	pool := phpfpm.PoolConfig{
 		SiteID:      req.SiteID,
 		Username:    username,
 		PHPVersion:  req.PHPVersion,
 		MaxChildren: 5,
-	}); err != nil {
-		_ = unpauseContainer(ctx, webName)
-		if hasDB {
-			_ = unpauseContainer(ctx, dbName)
-		}
-		return nil, fmt.Errorf("write phpfpm pool: %w", err)
 	}
-	if err := reloadPHPFPMVersion(ctx, req.PHPVersion); err != nil {
+	if err := phpfpm.WriteSiteConfig(pool); err != nil {
 		_ = unpauseContainer(ctx, webName)
 		if hasDB {
 			_ = unpauseContainer(ctx, dbName)
 		}
-		return nil, fmt.Errorf("reload php-fpm: %w", err)
+		return nil, fmt.Errorf("write phpfpm site config: %w", err)
+	}
+	if err := phpfpm.WriteServiceUnit(pool); err != nil {
+		_ = unpauseContainer(ctx, webName)
+		if hasDB {
+			_ = unpauseContainer(ctx, dbName)
+		}
+		return nil, fmt.Errorf("write phpfpm service unit: %w", err)
+	}
+	_, _ = runCmd(ctx, "systemctl", "daemon-reload")
+	if _, err := runCmd(ctx, "systemctl", "enable", "--now", phpfpm.ServiceUnitName(req.SiteID)); err != nil {
+		_ = unpauseContainer(ctx, webName)
+		if hasDB {
+			_ = unpauseContainer(ctx, dbName)
+		}
+		return nil, fmt.Errorf("start phpfpm service: %w", err)
 	}
 	socketPath := fmt.Sprintf("/run/php/%s.sock", username)
 	if err := waitForFile(socketPath, 30); err != nil {
