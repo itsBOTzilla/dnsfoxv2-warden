@@ -76,6 +76,19 @@ server {
         fastcgi_param HTTPS on;
         fastcgi_read_timeout 300;
         include fastcgi_params;
+        fastcgi_cache V2_SITES;
+        fastcgi_cache_valid 200 301 302 1h;
+        fastcgi_cache_valid 404 5m;
+        fastcgi_cache_key "$host$request_uri";
+        fastcgi_cache_bypass $cookie_wordpress_logged_in $cookie_wp_postpass $http_cache_control;
+        fastcgi_no_cache $cookie_wordpress_logged_in $cookie_wp_postpass;
+        add_header X-Cache-Status $upstream_cache_status;
+    }
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 7d;
+        add_header Cache-Control "public, no-transform";
+        access_log off;
     }
 
     location ~ /\. {
