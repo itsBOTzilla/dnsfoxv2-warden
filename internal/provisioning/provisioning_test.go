@@ -40,6 +40,25 @@ func TestPlanMaxChildren(t *testing.T) {
 	}
 }
 
+func TestPlanIsSmall(t *testing.T) {
+	tests := []struct {
+		plan     string
+		expected bool
+	}{
+		{"fox", true},
+		{"swift", false},
+		{"apex", false},
+		{"titan", false},
+		{"unknown", false},
+	}
+	for _, tt := range tests {
+		got := planIsSmall(tt.plan)
+		if got != tt.expected {
+			t.Errorf("planIsSmall(%q) = %v, want %v", tt.plan, got, tt.expected)
+		}
+	}
+}
+
 func TestPlanLimits(t *testing.T) {
 	plans := []string{"fox", "swift", "apex", "titan"}
 	for _, plan := range plans {

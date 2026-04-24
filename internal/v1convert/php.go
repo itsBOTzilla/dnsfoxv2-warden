@@ -211,6 +211,7 @@ func (c *Converter) ConvertPHPSite(ctx context.Context, req PHPRequest) (*PHPRes
 		Username:    username,
 		PHPVersion:  req.PHPVersion,
 		MaxChildren: 5,
+		Ondemand:    true,
 	}
 	if err := phpfpm.WriteSiteConfig(pool); err != nil {
 		_ = unpauseContainer(ctx, webName)

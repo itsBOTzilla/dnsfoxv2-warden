@@ -196,6 +196,7 @@ func (c *Converter) ConvertWordPressSite(ctx context.Context, req WordPressReque
 		Username:    username,
 		PHPVersion:  req.PHPVersion,
 		MaxChildren: 5,
+		Ondemand:    true,
 	}
 	if err := phpfpm.WriteSiteConfig(pool); err != nil {
 		_ = unpauseContainer(ctx, webName)

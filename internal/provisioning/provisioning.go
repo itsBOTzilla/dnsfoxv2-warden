@@ -92,6 +92,7 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) (Provis
 		Username:    username,
 		PHPVersion:  cfg.PHPVersion,
 		MaxChildren: planMaxChildren(cfg.Plan),
+		Ondemand:    planIsSmall(cfg.Plan),
 	}
 	if err := phpfpm.WriteSiteConfig(pool); err != nil {
 		return ProvisionResult{}, fmt.Errorf("write phpfpm site config: %w", err)
@@ -174,6 +175,7 @@ func (p *Provisioner) SwitchPHPVersion(ctx context.Context, siteID, fromVersion,
 		Username:    username,
 		PHPVersion:  toVersion,
 		MaxChildren: planMaxChildren("fox"),
+		Ondemand:    false,
 	}
 
 	// Write new config and service unit for the target version.
@@ -243,6 +245,12 @@ func SiteUsername(siteID string) string {
 
 // siteUsername is the unexported alias used within this package.
 func siteUsername(siteID string) string { return SiteUsername(siteID) }
+
+// planIsSmall returns true for low-traffic plans that should use the ondemand
+// PHP-FPM process manager instead of dynamic.
+func planIsSmall(plan string) bool {
+	return plan == "fox"
+}
 
 // planMaxChildren maps plan to PHP-FPM pm.max_children.
 func planMaxChildren(plan string) int {

@@ -14,6 +14,9 @@ type PoolConfig struct {
 	Username    string
 	PHPVersion  string // e.g. "8.3"
 	MaxChildren int
+	// Ondemand selects the ondemand process manager with a 60s idle timeout.
+	// Use for low-traffic or small-plan sites. Dynamic is used when false.
+	Ondemand bool
 }
 
 // siteConfigTemplate is a standalone php-fpm config for a single site.
@@ -36,10 +39,19 @@ listen.owner = www-data
 listen.group = www-data
 listen.mode = 0660
 
+{{if .Ondemand -}}
 pm = ondemand
 pm.max_children = {{.MaxChildren}}
-pm.process_idle_timeout = 10s
+pm.process_idle_timeout = 60s
 pm.max_requests = 500
+{{- else -}}
+pm = dynamic
+pm.max_children = {{.MaxChildren}}
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+pm.max_requests = 500
+{{- end}}
 
 access.log = /var/log/dnsfox/phpfpm-{{.SiteID}}-access.log
 php_admin_value[error_log] = /var/log/dnsfox/phpfpm-{{.SiteID}}-php.log
