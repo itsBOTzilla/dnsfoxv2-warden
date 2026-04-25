@@ -243,7 +243,6 @@ func (e *Executor) handleMigrateSitePlugin(ctx context.Context, payload map[stri
 	migImportID, _ := payload["migration_import_id"].(string)
 	sourceDomain, _ := payload["source_domain"].(string)
 	targetDomain, _ := payload["target_domain"].(string)
-	tablePrefix, _ := payload["table_prefix"].(string)
 	importFiles, _ := payload["import_files"].(bool)
 	importDatabase, _ := payload["import_database"].(bool)
 
@@ -281,9 +280,6 @@ func (e *Executor) handleMigrateSitePlugin(ctx context.Context, payload map[stri
 
 	// WP-CLI search-replace to swap source domain → target domain in the DB.
 	if importDatabase && sourceDomain != "" && targetDomain != "" && sourceDomain != targetDomain {
-		if tablePrefix == "" {
-			tablePrefix = "wp_"
-		}
 		srOut, srErr := exec.CommandContext(ctx,
 			"wp", "search-replace", sourceDomain, targetDomain,
 			"--path="+docroot, "--allow-root", "--all-tables",
@@ -384,7 +380,7 @@ func (e *Executor) extractMigrationFiles(ctx context.Context, migImportID, docro
 		return fmt.Errorf("mkdir docroot: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "tar", "-xzf", "-", "-C", docroot, "--strip-components=1")
+	cmd := exec.CommandContext(ctx, "tar", "-xzf", "-", "-C", docroot, "--strip-components=1", "--no-absolute-filenames", "--no-overwrite-dir")
 	cmd.Stdin = data
 	out, err := cmd.CombinedOutput()
 	if err != nil {
