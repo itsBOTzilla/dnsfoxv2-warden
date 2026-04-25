@@ -69,6 +69,7 @@ func BackupSite(ctx context.Context, siteID, backupType, linuxUser, b2KeyID, b2A
 	// Priority order:
 	// 1. v1-cgroup explicit: /home/{linuxUser}/public_html  (linuxUser from payload)
 	// 2. v1-cgroup derived:  /home/site_{12hexchars}/public_html  (first 12 hex chars of UUID)
+	// 2b. cgroup native:     /var/dnsfox/sites/{uuid}/public_html  (post-migration path)
 	// 3. v2-provisioner:     /var/www/{SiteUsername}/public
 	var siteDir, dbUsername string
 
@@ -88,6 +89,14 @@ func BackupSite(ctx context.Context, siteID, backupType, linuxUser, b2KeyID, b2A
 		if _, statErr := os.Stat(v1Dir); statErr == nil {
 			siteDir = v1Dir
 			dbUsername = derived
+		}
+	}
+
+	// Attempt 2b: cgroup-native path written by the v2 provisioner.
+	if siteDir == "" {
+		cgroupDir := "/var/dnsfox/sites/" + siteID + "/public_html"
+		if _, statErr := os.Stat(cgroupDir); statErr == nil {
+			siteDir = cgroupDir
 		}
 	}
 
@@ -247,8 +256,12 @@ func tarGzDir(srcDir, destPath string) error {
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
-		// Directories and symlinks carry no file content in the archive.
-		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		// Only read content from regular files — dirs, symlinks, devices, FIFOs and
+		// sockets all carry no byte content in the tar archive. Using IsRegular()
+		// is the single correct guard; the previous IsDir()+ModeSymlink check missed
+		// the case where filepath.Walk resolves a symlink-to-directory entry and
+		// os.Open succeeds but Read returns EISDIR.
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 

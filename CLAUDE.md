@@ -1,6 +1,6 @@
 # DNSFox v2 Warden Agent — CLAUDE.md
 
-Go binary deployed to every server as `/usr/local/bin/warden`. Current version: **2.70.6**.
+Go binary deployed to every server as `/usr/local/bin/warden-v2`. Current version: **2.70.7**.
 
 ## Hosting Model
 
@@ -37,11 +37,12 @@ Without `-a`, Go reuses a stale cached binary silently — no port binding, 502s
 ## Deploy Steps (when changing warden code)
 
 1. Bump `CurrentVersion` in `internal/updater/updater.go`
-2. `go build -a -o /tmp/warden-new ./cmd/warden/`
-3. `sudo systemctl stop warden && sudo cp /tmp/warden-new /usr/local/bin/warden && sudo systemctl start warden`
-4. `sudo cp /tmp/warden-new /opt/dnsfox/binaries/warden-linux-amd64`
-5. `echo "X.Y.Z" | sudo tee /opt/dnsfox/binaries/warden-version.txt`
-6. Remote servers auto-update within 15s via heartbeat version check
+2. `go build -a -o /tmp/warden-new .` (from repo root; `-a` flag required)
+3. Local deploy: `sudo systemctl stop warden-v2 && sudo cp /tmp/warden-new /usr/local/bin/warden-v2 && sudo systemctl start warden-v2`
+4. Stage for remote: `sudo cp /tmp/warden-new /opt/dnsfox/binaries/warden-v2-X.Y.Z-amd64`
+5. Generate checksum: `sha256sum /opt/dnsfox/binaries/warden-v2-X.Y.Z-amd64 | awk '{print $1}' | sudo tee /opt/dnsfox/binaries/warden-v2-X.Y.Z-amd64.sha256`
+6. Update API: `sudo sed -i 's/LATEST_WARDEN_VERSION=.*/LATEST_WARDEN_VERSION=X.Y.Z/' /etc/systemd/system/dnsfoxv2-api.service && sudo systemctl daemon-reload && sudo systemctl restart dnsfoxv2-api`
+7. Remote servers auto-update within 15s via heartbeat version check
 
 ## Key Internals
 
