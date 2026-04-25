@@ -168,7 +168,7 @@ func extractTarGz(archivePath, destDir string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(ff, tr); err != nil {
+			if _, err := io.Copy(ff, io.LimitReader(tr, 4<<30)); err != nil {
 				ff.Close()
 				return err
 			}

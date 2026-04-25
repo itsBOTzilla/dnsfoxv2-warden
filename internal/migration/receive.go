@@ -149,12 +149,15 @@ func extractTarGz(r io.Reader, dst string) error {
 			return fmt.Errorf("tar next: %w", err)
 		}
 
-		// Guard against path traversal.
+		// Guard against path traversal — two layers matching restore.go's pattern.
 		if strings.Contains(hdr.Name, "..") {
 			return fmt.Errorf("unsafe path in archive: %q", hdr.Name)
 		}
 
-		target := filepath.Join(dst, filepath.FromSlash(hdr.Name))
+		target := filepath.Join(dst, filepath.Clean(filepath.FromSlash(hdr.Name)))
+		if !strings.HasPrefix(target, filepath.Clean(dst)+string(os.PathSeparator)) && target != filepath.Clean(dst) {
+			return fmt.Errorf("illegal path in archive: %q", hdr.Name)
+		}
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
@@ -169,7 +172,7 @@ func extractTarGz(r io.Reader, dst string) error {
 			if err != nil {
 				return fmt.Errorf("create file %s: %w", target, err)
 			}
-			if _, err := io.Copy(f, tr); err != nil {
+			if _, err := io.Copy(f, io.LimitReader(tr, 4<<30)); err != nil {
 				f.Close()
 				return fmt.Errorf("write file %s: %w", target, err)
 			}
