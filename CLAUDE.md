@@ -17,12 +17,13 @@ have been deleted — the migration from Docker to cgroup is complete.
 
 ## Version Bumping (CRITICAL)
 
-When changing ANY warden code, ALWAYS bump version in ALL THREE files:
-1. `main.go` — version constant
-2. `Makefile` — VERSION variable
-3. `build-and-deploy.sh` — version string
+When changing ANY warden code, ALWAYS bump version in:
+1. `internal/updater/updater.go` — `CurrentVersion` variable (the authoritative source)
 
-Missing any one of these means remote servers (Nordri, Vestri) won't update.
+There is no `Makefile` or `build-and-deploy.sh` in this repo. Version is set either via
+the `CurrentVersion` var or at build time via `-ldflags "-X .../updater.CurrentVersion=x.y.z"`.
+
+Missing the bump means remote servers (Nordri, Vestri) won't update.
 
 ## Build
 
@@ -35,7 +36,7 @@ Without `-a`, Go reuses a stale cached binary silently — no port binding, 502s
 
 ## Deploy Steps (when changing warden code)
 
-1. Bump version in `main.go`, `Makefile`, `build-and-deploy.sh`
+1. Bump `CurrentVersion` in `internal/updater/updater.go`
 2. `go build -a -o /tmp/warden-new ./cmd/warden/`
 3. `sudo systemctl stop warden && sudo cp /tmp/warden-new /usr/local/bin/warden && sudo systemctl start warden`
 4. `sudo cp /tmp/warden-new /opt/dnsfox/binaries/warden-linux-amd64`

@@ -21,13 +21,13 @@ type ProvisionResult struct {
 
 // SiteConfig holds everything needed to provision a site.
 type SiteConfig struct {
-	SiteID             string
-	Domain             string
-	CustomerID         string
-	PHPVersion         string // e.g. "8.3"
-	Plan               string // fox, swift, apex, titan
+	SiteID              string
+	Domain              string
+	CustomerID          string
+	PHPVersion          string // e.g. "8.3"
+	Plan                string // fox, swift, apex, titan
 	DisableFastCGICache bool   // opt-out of FastCGI page cache (default: cache enabled)
-	MaxUploadSize      string  // nginx client_max_body_size override; empty = plan default
+	MaxUploadSize       string // nginx client_max_body_size override; empty = plan default
 }
 
 // PlanLimits maps plan names to cgroup resource limits.
@@ -110,14 +110,14 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) (Provis
 		uploadSize = planMaxUploadSize(cfg.Plan)
 	}
 	vhost := nginx.VhostConfig{
-		SiteID:            cfg.SiteID,
-		Domain:            cfg.Domain,
-		Subdomain:         subdomain,
-		Username:          username,
-		DocumentRoot:      docroot,
-		PHPVersion:        cfg.PHPVersion,
+		SiteID:             cfg.SiteID,
+		Domain:             cfg.Domain,
+		Subdomain:          subdomain,
+		Username:           username,
+		DocumentRoot:       docroot,
+		PHPVersion:         cfg.PHPVersion,
 		EnableFastCGICache: !cfg.DisableFastCGICache,
-		MaxUploadSize:     uploadSize,
+		MaxUploadSize:      uploadSize,
 	}
 	if err := p.Nginx.WriteVhost(vhost); err != nil {
 		return ProvisionResult{}, fmt.Errorf("write nginx vhost: %w", err)
@@ -198,8 +198,8 @@ func (p *Provisioner) SwitchPHPVersion(ctx context.Context, siteID, fromVersion,
 	// ServiceUnitName is version-agnostic — same unit file, just with updated ExecStart).
 	// Since we overwrote the unit, we just restart it.
 	svcName := phpfpm.ServiceUnitName(siteID)
-	exec.Command("systemctl", "daemon-reload").Run()                 //nolint:errcheck
-	exec.Command("systemctl", "restart", svcName).Run()              //nolint:errcheck
+	exec.Command("systemctl", "daemon-reload").Run()    //nolint:errcheck
+	exec.Command("systemctl", "restart", svcName).Run() //nolint:errcheck
 
 	socketPath := fmt.Sprintf("/run/php/%s.sock", username)
 	if err := waitForSocket(socketPath, 20); err != nil {
@@ -208,8 +208,8 @@ func (p *Provisioner) SwitchPHPVersion(ctx context.Context, siteID, fromVersion,
 
 	// Clean up any legacy global-pool configs and reload the global master gracefully.
 	if oldVersion := phpfpm.DetectPoolVersion(siteID); oldVersion != "" {
-		phpfpm.RemovePoolConfig(siteID)                             //nolint:errcheck
-		phpfpm.ReloadGlobalMaster(oldVersion)                      //nolint:errcheck
+		phpfpm.RemovePoolConfig(siteID)       //nolint:errcheck
+		phpfpm.ReloadGlobalMaster(oldVersion) //nolint:errcheck
 		log.Printf("[provisioning] removed legacy global pool config for site %s", siteID)
 	}
 

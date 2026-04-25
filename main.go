@@ -25,25 +25,25 @@ import (
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
+	wardenconnect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/archive"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/executor"
-	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/archive"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/filemgr"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/heartbeat"
-	ptypkg "github.com/itsBOTzilla/dnsfoxv2-warden/internal/pty"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/jobs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/metrics"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/migration"
+	ptypkg "github.com/itsBOTzilla/dnsfoxv2-warden/internal/pty"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/siteusage"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/updater"
-	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
-	wardenconnect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 )
 
 // jobStatus tracks the result of a completed job for GetProvisioningStatus queries.
 type jobStatus struct {
-	status   wardenv1.ProvisioningStatus
-	errMsg   string
+	status     wardenv1.ProvisioningStatus
+	errMsg     string
 	finishedAt time.Time
 }
 
@@ -83,9 +83,9 @@ func (t *jobTracker) get(jobID string) (wardenv1.ProvisioningStatus, string) {
 // It embeds UnimplementedWardenServiceHandler for any RPCs not yet wired.
 type wardenHandler struct {
 	wardenconnect.UnimplementedWardenServiceHandler
-	exec    *executor.Executor
-	tracker *jobTracker
-	cfg     *config.Config
+	exec       *executor.Executor
+	tracker    *jobTracker
+	cfg        *config.Config
 	cpuSampler *metrics.CPUSampler
 	files      *filemgr.Handler
 }
@@ -175,7 +175,7 @@ func (h *wardenHandler) GetServerStats(
 		DiskTotalGb:   disk.TotalGB,
 		LoadAverage:   load,
 		Services:      svcs,
-		WardenVersion:  updater.CurrentVersion,
+		WardenVersion: updater.CurrentVersion,
 		SiteCount:     siteCount,
 		Timestamp:     timestamppb.Now(),
 	}

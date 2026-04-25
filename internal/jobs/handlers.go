@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
+	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/nodejs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/redisutil"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/wordpress"
-	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 )
 
 // handlerResult carries the provisioning status, error message, and optional

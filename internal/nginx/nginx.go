@@ -18,14 +18,14 @@ func NewManager() *Manager {
 
 // VhostConfig holds the configuration for an Nginx vhost.
 type VhostConfig struct {
-	SiteID            string
-	Domain            string
-	Subdomain         string // e.g. "abc12345.sites.dnsfox.com"; added to server_name when set
-	Username          string
-	DocumentRoot      string
-	PHPVersion        string
+	SiteID             string
+	Domain             string
+	Subdomain          string // e.g. "abc12345.sites.dnsfox.com"; added to server_name when set
+	Username           string
+	DocumentRoot       string
+	PHPVersion         string
 	EnableFastCGICache bool   // enable FastCGI page cache (opt-in; always off for Node.js)
-	MaxUploadSize     string  // nginx client_max_body_size, e.g. "64M"; defaults to "64M" if empty
+	MaxUploadSize      string // nginx client_max_body_size, e.g. "64M"; defaults to "64M" if empty
 }
 
 // EffectiveMaxUploadSize returns MaxUploadSize, defaulting to "64M" when empty.
