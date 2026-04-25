@@ -47,6 +47,10 @@ var malwarePatterns = []*regexp.Regexp{
 // leave empty to derive the path from siteID using the v2 convention.
 // Infected files are moved to /var/quarantine/site_{id}/{timestamp}/.
 func ScanSite(ctx context.Context, siteID, linuxUser string) (*ScanResult, error) {
+	// Hard cap at 25 min so we return a clean error before the 30-min reaper fires.
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, 25*time.Minute)
+	defer cancel()
 	siteDir := ""
 
 	// Attempt 1: explicit linuxUser from payload.
@@ -115,8 +119,12 @@ func ScanSite(ctx context.Context, siteID, linuxUser string) (*ScanResult, error
 func runClamScan(ctx context.Context, siteDir string) (infected []string, total int, err error) {
 	out, err := exec.CommandContext(ctx, "clamdscan", "--fdpass", "--no-summary", siteDir).CombinedOutput()
 	if err != nil {
-		// Try clamscan fallback.
-		out2, err2 := exec.CommandContext(ctx, "clamscan", "--no-summary", "-r", siteDir).CombinedOutput()
+		// Try clamscan fallback. Limit file/scan sizes to avoid hanging on huge files.
+		out2, err2 := exec.CommandContext(ctx, "clamscan",
+			"--no-summary", "-r",
+			"--max-filesize=64M", "--max-scansize=256M",
+			siteDir,
+		).CombinedOutput()
 		if err2 != nil {
 			return nil, 0, fmt.Errorf("clamdscan failed (%v) and clamscan failed (%v)", err, err2)
 		}
