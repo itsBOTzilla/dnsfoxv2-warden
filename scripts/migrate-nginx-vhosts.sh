@@ -202,6 +202,9 @@ server {
     root ${docroot};
     index index.php index.html;
 
+    client_max_body_size 64M;
+    client_body_timeout 300s;
+
     access_log ${LOG_DIR}/nginx-${site_id}-access.log;
     error_log  ${LOG_DIR}/nginx-${site_id}-error.log;
 
@@ -219,14 +222,35 @@ server {
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_param HTTPS on;
         fastcgi_read_timeout 300;
+        fastcgi_send_timeout 300;
+        fastcgi_buffer_size 32k;
+        fastcgi_buffers 16 16k;
+        fastcgi_busy_buffers_size 64k;
         include fastcgi_params;
+        set \$skip_cache 0;
+        if (\$request_method = POST)                                       { set \$skip_cache 1; }
+        if (\$request_uri ~* "^(/cart|/checkout|/my-account)")            { set \$skip_cache 1; }
         fastcgi_cache V2_SITES;
-        fastcgi_cache_valid 200 301 302 1h;
-        fastcgi_cache_valid 404 5m;
-        fastcgi_cache_key "\$host\$request_uri";
-        fastcgi_cache_bypass \$cookie_wordpress_logged_in \$cookie_wp_postpass \$http_cache_control;
-        fastcgi_no_cache \$cookie_wordpress_logged_in \$cookie_wp_postpass;
-        add_header X-Cache-Status \$upstream_cache_status;
+        fastcgi_cache_key "\$scheme\$request_method\$host\$request_uri";
+        fastcgi_cache_valid 200 301 302 60m;
+        fastcgi_cache_valid 404 1m;
+        fastcgi_cache_lock on;
+        fastcgi_cache_use_stale error timeout invalid_header http_500 http_503;
+        fastcgi_cache_bypass \$skip_cache
+                             \$cookie_wordpress_logged_in
+                             \$cookie_wordpress_sec
+                             \$cookie_comment_author
+                             \$cookie_woocommerce_cart_hash
+                             \$cookie_woocommerce_items_in_cart
+                             \$cookie_wp_woocommerce_session;
+        fastcgi_no_cache    \$skip_cache
+                             \$cookie_wordpress_logged_in
+                             \$cookie_wordpress_sec
+                             \$cookie_comment_author
+                             \$cookie_woocommerce_cart_hash
+                             \$cookie_woocommerce_items_in_cart
+                             \$cookie_wp_woocommerce_session;
+        add_header X-Cache-Status \$upstream_cache_status always;
     }
 
     location /_dba/ {
@@ -239,6 +263,14 @@ server {
         proxy_buffering off;
         proxy_read_timeout 300s;
         access_log off;
+    }
+
+    # Cache purge — localhost only. Warden handles actual file removal via PurgeCache().
+    location ~ ^/_purge(/.*)?\$ {
+        allow 127.0.0.1;
+        deny all;
+        return 200 "PURGED\n";
+        add_header Content-Type text/plain;
     }
 
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)\$ {

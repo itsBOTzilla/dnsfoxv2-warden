@@ -21,11 +21,13 @@ type ProvisionResult struct {
 
 // SiteConfig holds everything needed to provision a site.
 type SiteConfig struct {
-	SiteID     string
-	Domain     string
-	CustomerID string
-	PHPVersion string // e.g. "8.3"
-	Plan       string // fox, swift, apex, titan
+	SiteID             string
+	Domain             string
+	CustomerID         string
+	PHPVersion         string // e.g. "8.3"
+	Plan               string // fox, swift, apex, titan
+	DisableFastCGICache bool   // opt-out of FastCGI page cache (default: cache enabled)
+	MaxUploadSize      string  // nginx client_max_body_size override; empty = plan default
 }
 
 // PlanLimits maps plan names to cgroup resource limits.
@@ -103,13 +105,19 @@ func (p *Provisioner) ProvisionSite(ctx context.Context, cfg SiteConfig) (Provis
 	log.Printf("wrote php-fpm site config and service for %s", cfg.SiteID)
 
 	// Step 4: write Nginx vhost config (includes nginx -t validation)
+	uploadSize := cfg.MaxUploadSize
+	if uploadSize == "" {
+		uploadSize = planMaxUploadSize(cfg.Plan)
+	}
 	vhost := nginx.VhostConfig{
-		SiteID:       cfg.SiteID,
-		Domain:       cfg.Domain,
-		Subdomain:    subdomain,
-		Username:     username,
-		DocumentRoot: docroot,
-		PHPVersion:   cfg.PHPVersion,
+		SiteID:            cfg.SiteID,
+		Domain:            cfg.Domain,
+		Subdomain:         subdomain,
+		Username:          username,
+		DocumentRoot:      docroot,
+		PHPVersion:        cfg.PHPVersion,
+		EnableFastCGICache: !cfg.DisableFastCGICache,
+		MaxUploadSize:     uploadSize,
 	}
 	if err := p.Nginx.WriteVhost(vhost); err != nil {
 		return ProvisionResult{}, fmt.Errorf("write nginx vhost: %w", err)
@@ -265,6 +273,20 @@ func planMaxChildren(plan string) int {
 		return 40
 	default:
 		return 5
+	}
+}
+
+// planMaxUploadSize returns the nginx client_max_body_size string for a plan.
+func planMaxUploadSize(plan string) string {
+	switch plan {
+	case "swift":
+		return "128M"
+	case "apex":
+		return "256M"
+	case "titan":
+		return "512M"
+	default: // fox and unknown plans
+		return "64M"
 	}
 }
 

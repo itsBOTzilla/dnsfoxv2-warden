@@ -244,7 +244,12 @@ func main() {
 	}))
 
 	// Register HTTP handler for inbound site migration file uploads.
-	mux.Handle("/migration/receive/", migration.ReceiveHandler(cfg.APIToken))
+	mux.Handle("/migration/receive/", migration.ReceiveHandler(migration.ReceiverConfig{
+		Token:         cfg.APIToken,
+		RedisHost:     cfg.RedisHost,
+		RedisPort:     cfg.RedisPort,
+		RedisPassword: cfg.RedisPassword,
+	}))
 
 	// Register HTTP handler for file-manager multipart uploads.
 	// Authenticates via WARDEN_INTERNAL_TOKEN (shared with the v2 API).

@@ -27,6 +27,7 @@ import (
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/credsstore"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/redisutil"
 )
 
 const (
@@ -36,9 +37,18 @@ const (
 	maxMemoryParse = 32 << 20
 )
 
+// ReceiverConfig configures the inbound migration receiver.
+type ReceiverConfig struct {
+	Token         string // warden API token for authenticating inbound pushes
+	RedisHost     string
+	RedisPort     string
+	RedisPassword string
+}
+
 // ReceiveHandler returns an http.Handler for /migration/receive/{siteID}.
-// token is the warden's own API token used to authenticate inbound pushes.
-func ReceiveHandler(token string) http.Handler {
+// After a successful DB import it flushes stale Redis object-cache keys so the
+// migrated site does not serve cached responses from the source server.
+func ReceiveHandler(cfg ReceiverConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -47,7 +57,7 @@ func ReceiveHandler(token string) http.Handler {
 
 		// Authenticate with Bearer token.
 		auth := r.Header.Get("Authorization")
-		if auth != "Bearer "+token {
+		if auth != "Bearer "+cfg.Token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -87,6 +97,7 @@ func ReceiveHandler(token string) http.Handler {
 		log.Printf("[migration:receive] files extracted to %s", docroot)
 
 		// Import DB dump if present.
+		dbImported := false
 		dbFile, _, dbErr := r.FormFile("db")
 		if dbErr == nil {
 			defer dbFile.Close()
@@ -96,10 +107,23 @@ func ReceiveHandler(token string) http.Handler {
 				return
 			}
 			log.Printf("[migration:receive] db imported for site=%s", siteID)
+			dbImported = true
 		}
 
 		// Fix ownership after extraction.
 		exec.Command("chown", "-R", username+":"+username, docroot).Run() //nolint:errcheck
+
+		// Flush Redis object-cache keys for this site. Container→bare-metal migrations
+		// change the Redis DB mapping; stale keys from the source server must be evicted
+		// so the migrated site rebuilds its cache from the imported DB.
+		if dbImported && cfg.RedisHost != "" {
+			deleted, rerr := redisutil.FlushSiteKeys(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword, siteID)
+			if rerr != nil {
+				log.Printf("[migration:receive] warn: redis flush site %s: %v", siteID, rerr)
+			} else {
+				log.Printf("[migration:receive] redis flush: deleted %d keys for site %s", deleted, siteID)
+			}
+		}
 
 		log.Printf("[migration:receive] migration receive complete for site=%s", siteID)
 		w.WriteHeader(http.StatusOK)

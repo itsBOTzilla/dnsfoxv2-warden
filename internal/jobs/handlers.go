@@ -17,6 +17,7 @@ import (
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/nodejs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/redisutil"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/wordpress"
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 )
@@ -102,6 +103,10 @@ func (e *Executor) handleProvisionSite(ctx context.Context, payload map[string]i
 
 	b, _ := json.Marshal(res)
 	log.Printf("[jobs] provision_site done: site=%s", siteID)
+
+	// Seed the FastCGI cache in the background — non-blocking, non-fatal.
+	go warmUpSiteCache(provRes.Subdomain)
+
 	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, "", string(b)
 }
 
@@ -228,7 +233,7 @@ func (e *Executor) handlePurgeCache(_ context.Context, payload map[string]interf
 
 	flushRedis, _ := payload["flush_redis"].(bool)
 	if flushRedis {
-		deleted, rerr := flushRedisSiteKeys(e.cfg.RedisHost, e.cfg.RedisPort, e.cfg.RedisPassword, siteID)
+		deleted, rerr := redisutil.FlushSiteKeys(e.cfg.RedisHost, e.cfg.RedisPort, e.cfg.RedisPassword, siteID)
 		if rerr != nil {
 			// Redis flush failure is non-fatal — nginx cache is already clean.
 			log.Printf("[jobs] warn: redis flush site %s: %v", siteID, rerr)
@@ -240,53 +245,26 @@ func (e *Executor) handlePurgeCache(_ context.Context, payload map[string]interf
 	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
 }
 
-// flushRedisSiteKeys deletes all Redis keys whose name begins with "site_{siteID}:"
-// using SCAN + DEL in batches. It never calls FLUSHALL or FLUSHDB.
-// Returns the total number of keys deleted.
-func flushRedisSiteKeys(host, port, password, siteID string) (int, error) {
-	prefix := "site_" + siteID + ":*"
-	addr := host + ":" + port
-
-	baseArgs := []string{"-h", host, "-p", port}
-	if password != "" {
-		baseArgs = append(baseArgs, "-a", password, "--no-auth-warning")
+// warmUpSiteCache crawls the site's staging subdomain after provisioning to seed
+// the FastCGI page cache. Runs as a background goroutine — errors are logged only.
+func warmUpSiteCache(subdomain string) {
+	if subdomain == "" {
+		return
 	}
+	// Allow nginx + PHP-FPM to fully start before crawling.
+	time.Sleep(15 * time.Second)
 
-	cursor := "0"
-	total := 0
-	for {
-		scanArgs := append(baseArgs, "SCAN", cursor, "MATCH", prefix, "COUNT", "200")
-		out, err := exec.Command("redis-cli", scanArgs...).Output()
+	client := &http.Client{Timeout: 30 * time.Second}
+	for _, path := range []string{"/", "/sitemap.xml"} {
+		u := "https://" + subdomain + path
+		resp, err := client.Get(u) //nolint:noctx
 		if err != nil {
-			return total, fmt.Errorf("SCAN %s: %w", addr, err)
+			log.Printf("[jobs] cache warm-up: %s: %v", u, err)
+			continue
 		}
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		if len(lines) < 1 {
-			break
-		}
-		cursor = strings.TrimSpace(lines[0])
-		keys := lines[1:]
-
-		var toDelete []string
-		for _, k := range keys {
-			k = strings.TrimSpace(k)
-			if k != "" {
-				toDelete = append(toDelete, k)
-			}
-		}
-		if len(toDelete) > 0 {
-			delArgs := append(baseArgs, append([]string{"DEL"}, toDelete...)...)
-			if _, err := exec.Command("redis-cli", delArgs...).Output(); err != nil {
-				return total, fmt.Errorf("DEL batch: %w", err)
-			}
-			total += len(toDelete)
-		}
-
-		if cursor == "0" {
-			break
-		}
+		resp.Body.Close()
+		log.Printf("[jobs] cache warm-up: seeded %s (status %d)", u, resp.StatusCode)
 	}
-	return total, nil
 }
 
 // handleSyncWafRules downloads the consolidated WAF rule file from the API and

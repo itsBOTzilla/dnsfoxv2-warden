@@ -18,17 +18,29 @@ func NewManager() *Manager {
 
 // VhostConfig holds the configuration for an Nginx vhost.
 type VhostConfig struct {
-	SiteID       string
-	Domain       string
-	Subdomain    string // e.g. "abc12345.sites.dnsfox.com"; added to server_name when set
-	Username     string
-	DocumentRoot string
-	PHPVersion   string
+	SiteID            string
+	Domain            string
+	Subdomain         string // e.g. "abc12345.sites.dnsfox.com"; added to server_name when set
+	Username          string
+	DocumentRoot      string
+	PHPVersion        string
+	EnableFastCGICache bool   // enable FastCGI page cache (opt-in; always off for Node.js)
+	MaxUploadSize     string  // nginx client_max_body_size, e.g. "64M"; defaults to "64M" if empty
+}
+
+// EffectiveMaxUploadSize returns MaxUploadSize, defaulting to "64M" when empty.
+func (c VhostConfig) EffectiveMaxUploadSize() string {
+	if c.MaxUploadSize != "" {
+		return c.MaxUploadSize
+	}
+	return "64M"
 }
 
 // vhostTemplate generates an HTTP→HTTPS redirect block plus an HTTPS server block.
 // Wildcard cert at /etc/ssl/dnsfox/wildcard-sites/ covers *.sites.dnsfox.com.
 // X-Robots-Tag noindex prevents staging sites from being indexed.
+// FastCGI page cache is opt-in via EnableFastCGICache; the V2_SITES zone must be
+// declared in /etc/nginx/nginx.conf by the platform deployer before enabling.
 const vhostTemplate = `# DNSFox v2 — auto-generated vhost for {{.Domain}}
 # Do not edit manually — managed by Warden
 
@@ -58,6 +70,9 @@ server {
     root {{.DocumentRoot}};
     index index.php index.html;
 
+    client_max_body_size {{.EffectiveMaxUploadSize}};
+    client_body_timeout 300s;
+
     access_log /var/log/dnsfox/nginx-{{.SiteID}}-access.log;
     error_log  /var/log/dnsfox/nginx-{{.SiteID}}-error.log;
 
@@ -75,20 +90,51 @@ server {
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param HTTPS on;
         fastcgi_read_timeout 300;
+        fastcgi_send_timeout 300;
+        fastcgi_buffer_size 32k;
+        fastcgi_buffers 16 16k;
+        fastcgi_busy_buffers_size 64k;
         include fastcgi_params;
+{{- if .EnableFastCGICache}}
+        set $skip_cache 0;
+        if ($request_method = POST)                                       { set $skip_cache 1; }
+        if ($request_uri ~* "^(/cart|/checkout|/my-account)")            { set $skip_cache 1; }
         fastcgi_cache V2_SITES;
-        fastcgi_cache_valid 200 301 302 1h;
-        fastcgi_cache_valid 404 5m;
-        fastcgi_cache_key "$host$request_uri";
-        fastcgi_cache_bypass $cookie_wordpress_logged_in $cookie_wp_postpass $http_cache_control;
-        fastcgi_no_cache $cookie_wordpress_logged_in $cookie_wp_postpass;
-        add_header X-Cache-Status $upstream_cache_status;
+        fastcgi_cache_key "$scheme$request_method$host$request_uri";
+        fastcgi_cache_valid 200 301 302 60m;
+        fastcgi_cache_valid 404 1m;
+        fastcgi_cache_lock on;
+        fastcgi_cache_use_stale error timeout invalid_header http_500 http_503;
+        fastcgi_cache_bypass $skip_cache
+                             $cookie_wordpress_logged_in
+                             $cookie_wordpress_sec
+                             $cookie_comment_author
+                             $cookie_woocommerce_cart_hash
+                             $cookie_woocommerce_items_in_cart
+                             $cookie_wp_woocommerce_session;
+        fastcgi_no_cache    $skip_cache
+                             $cookie_wordpress_logged_in
+                             $cookie_wordpress_sec
+                             $cookie_comment_author
+                             $cookie_woocommerce_cart_hash
+                             $cookie_woocommerce_items_in_cart
+                             $cookie_wp_woocommerce_session;
+        add_header X-Cache-Status $upstream_cache_status always;
+{{- end}}
     }
 
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
         expires 7d;
         add_header Cache-Control "public, no-transform";
         access_log off;
+    }
+
+    # Cache purge — localhost only. Warden handles actual file removal via PurgeCache().
+    location ~ ^/_purge(/.*)?$ {
+        allow 127.0.0.1;
+        deny all;
+        return 200 "PURGED\n";
+        add_header Content-Type text/plain;
     }
 
     location ~ /\. {
