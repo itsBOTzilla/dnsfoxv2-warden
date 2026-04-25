@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
@@ -33,10 +34,22 @@ func validateSiteID(id string) error {
 	return nil
 }
 
+// deriveShortID returns the first 12 hex chars of a UUID with dashes removed.
+// Matches the v1-cgroup Linux username convention: site_{12hexchars}.
+func deriveShortID(siteID string) string {
+	hex := strings.ReplaceAll(siteID, "-", "")
+	if len(hex) > 12 {
+		return hex[:12]
+	}
+	return hex
+}
+
 // BackupSite creates an archive of the site and uploads it to B2.
-// backupType: "files", "db", or "full"
+// backupType: "files", "db", or "full".
+// linuxUser is the OS username for v1-cgroup sites (e.g. "site_ed58d27bf42f");
+// leave empty to derive it from siteID using the v2 provisioner convention.
 // Returns the B2 file ID, size in bytes, and any error.
-func BackupSite(ctx context.Context, siteID, backupType, b2KeyID, b2AppKey, b2Bucket string) (fileID string, sizeBytes int64, err error) {
+func BackupSite(ctx context.Context, siteID, backupType, linuxUser, b2KeyID, b2AppKey, b2Bucket string) (fileID string, sizeBytes int64, err error) {
 	if err := validateSiteID(siteID); err != nil {
 		return "", 0, err
 	}
@@ -52,22 +65,52 @@ func BackupSite(ctx context.Context, siteID, backupType, b2KeyID, b2AppKey, b2Bu
 		return "", 0, fmt.Errorf("backup: b2 auth: %w", err)
 	}
 
-	// Use the canonical SiteUsername helper so the directory matches what
-	// provisioning.CreateSystemUser created (15-char UUID cap).
-	username := provisioning.SiteUsername(siteID)
-	siteDir := "/var/www/" + username
+	// Resolve site directory and DB username.
+	// Priority order:
+	// 1. v1-cgroup explicit: /home/{linuxUser}/public_html  (linuxUser from payload)
+	// 2. v1-cgroup derived:  /home/site_{12hexchars}/public_html  (first 12 hex chars of UUID)
+	// 3. v2-provisioner:     /var/www/{SiteUsername}/public
+	var siteDir, dbUsername string
+
+	// Attempt 1: explicit linuxUser from payload.
+	if linuxUser != "" {
+		v1Dir := "/home/" + linuxUser + "/public_html"
+		if _, statErr := os.Stat(v1Dir); statErr == nil {
+			siteDir = v1Dir
+			dbUsername = linuxUser
+		}
+	}
+
+	// Attempt 2: derive v1 linux user from siteID (first 12 hex chars, no dashes).
+	if siteDir == "" {
+		derived := "site_" + deriveShortID(siteID)
+		v1Dir := "/home/" + derived + "/public_html"
+		if _, statErr := os.Stat(v1Dir); statErr == nil {
+			siteDir = v1Dir
+			dbUsername = derived
+		}
+	}
+
+	// Attempt 3: v2-provisioner path.
+	if siteDir == "" {
+		username := provisioning.SiteUsername(siteID)
+		siteDir = "/var/www/" + username + "/public"
+		if dbUsername == "" {
+			dbUsername = "db_" + siteID
+		}
+	}
 
 	switch backupType {
 	case "files":
 		return backupFiles(ctx, b2, siteID, siteDir, ts, tmpDir)
 	case "db":
-		return backupDB(ctx, b2, siteID, username, ts, tmpDir)
+		return backupDB(ctx, b2, siteID, dbUsername, ts, tmpDir)
 	case "full":
 		fid, fsz, ferr := backupFiles(ctx, b2, siteID, siteDir, ts, tmpDir)
 		if ferr != nil {
 			return "", 0, ferr
 		}
-		_, _, derr := backupDB(ctx, b2, siteID, username, ts, tmpDir)
+		_, _, derr := backupDB(ctx, b2, siteID, dbUsername, ts, tmpDir)
 		if derr != nil {
 			log.Printf("[backup] warn: db backup failed (files OK): %v", derr)
 		}
@@ -101,18 +144,14 @@ func backupFiles(ctx context.Context, b2 *b2Client, siteID, siteDir, ts, tmpDir 
 }
 
 // backupDB dumps the MariaDB database for the site and uploads to B2.
-func backupDB(ctx context.Context, b2 *b2Client, siteID, username, ts, tmpDir string) (string, int64, error) {
-	dbName := "db_" + siteID
-	dbUser := "db_" + siteID
+// dbUsername is either the linux user (v1-cgroup: "site_X") or "db_{siteID}" (v2).
+func backupDB(ctx context.Context, b2 *b2Client, siteID, dbUsername, ts, tmpDir string) (string, int64, error) {
 	archivePath := filepath.Join(tmpDir, fmt.Sprintf("site_%s_db_%s.sql.gz", siteID, ts))
 
-	// Check if MySQL user exists.
-	checkCmd := exec.CommandContext(ctx,
-		"mysql", "-h", "127.0.0.1", "-P", "3307",
-		"-u", "root", "-e",
-		fmt.Sprintf("SELECT 1 FROM mysql.user WHERE User='%s' LIMIT 1", dbUser))
-	if err := checkCmd.Run(); err != nil {
-		return "", 0, fmt.Errorf("backup db: user %s not found (no DB for site): %w", dbUser, err)
+	// Prefer mariadb-dump (MariaDB 11+), fall back to mysqldump.
+	dumpBin := "mariadb-dump"
+	if _, err := exec.LookPath(dumpBin); err != nil {
+		dumpBin = "mysqldump"
 	}
 
 	outFile, err := os.Create(archivePath)
@@ -125,13 +164,17 @@ func backupDB(ctx context.Context, b2 *b2Client, siteID, username, ts, tmpDir st
 	defer gzw.Close()
 
 	dumpCmd := exec.CommandContext(ctx,
-		"mysqldump", "-h", "127.0.0.1", "-P", "3307",
-		"-u", dbUser, dbName,
+		dumpBin, "-h", "127.0.0.1", "-P", "3307",
+		"-u", dbUsername, dbUsername,
 		"--single-transaction", "--quick", "--lock-tables=false")
 	dumpCmd.Stdout = gzw
 
 	if err := dumpCmd.Run(); err != nil {
-		return "", 0, fmt.Errorf("backup db: mysqldump: %w", err)
+		// DB may not exist (static/Node.js sites) — treat as non-fatal.
+		log.Printf("[backup] db dump skipped for site %s (user=%s): %v", siteID, dbUsername, err)
+		gzw.Close()  //nolint:errcheck
+		outFile.Close() //nolint:errcheck
+		return "", 0, nil
 	}
 	if err := gzw.Close(); err != nil {
 		return "", 0, fmt.Errorf("backup db: gzip close: %w", err)
@@ -144,6 +187,9 @@ func backupDB(ctx context.Context, b2 *b2Client, siteID, username, ts, tmpDir st
 	if err != nil {
 		return "", 0, fmt.Errorf("backup db: read archive: %w", err)
 	}
+	if len(data) == 0 {
+		return "", 0, nil
+	}
 
 	fileName := fmt.Sprintf("sites/%s/db_%s.sql.gz", siteID, ts)
 	fid, err := b2.uploadFile(ctx, fileName, data)
@@ -151,7 +197,6 @@ func backupDB(ctx context.Context, b2 *b2Client, siteID, username, ts, tmpDir st
 		return "", 0, fmt.Errorf("backup db: b2 upload: %w", err)
 	}
 
-	_ = username // kept for future logging
 	log.Printf("[backup] site %s db uploaded to B2 (%d bytes)", siteID, len(data))
 	return fid, int64(len(data)), nil
 }

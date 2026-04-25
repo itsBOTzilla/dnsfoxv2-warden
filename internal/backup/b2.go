@@ -24,13 +24,18 @@ type b2Client struct {
 }
 
 type b2AuthResp struct {
-	APIInfo struct {
+	AccountID string `json:"accountId"`
+	APIInfo   struct {
 		StorageAPI struct {
 			APIURL      string `json:"apiUrl"`
 			DownloadURL string `json:"downloadUrl"`
 		} `json:"storageApi"`
 	} `json:"apiInfo"`
 	AuthorizationToken string `json:"authorizationToken"`
+	// Allowed is populated when the application key is restricted to a specific bucket.
+	Allowed struct {
+		BucketID string `json:"bucketId"`
+	} `json:"allowed"`
 }
 
 type b2GetUploadURLResp struct {
@@ -84,8 +89,15 @@ func newB2Client(ctx context.Context, keyID, appKey, bucketName string) (*b2Clie
 		httpClient:  hc,
 	}
 
+	// Bucket-restricted application keys have allowed.bucketId pre-filled;
+	// calling b2_list_buckets with such a key returns HTTP 400.
+	if auth.Allowed.BucketID != "" {
+		client.bucketID = auth.Allowed.BucketID
+		return client, nil
+	}
+
 	// Resolve bucket name → bucket ID.
-	bucketID, err := client.resolveBucketID(ctx, bucketName)
+	bucketID, err := client.resolveBucketID(ctx, auth.AccountID, bucketName)
 	if err != nil {
 		return nil, fmt.Errorf("b2 resolve bucket: %w", err)
 	}
@@ -93,8 +105,11 @@ func newB2Client(ctx context.Context, keyID, appKey, bucketName string) (*b2Clie
 	return client, nil
 }
 
-func (c *b2Client) resolveBucketID(ctx context.Context, bucketName string) (string, error) {
+func (c *b2Client) resolveBucketID(ctx context.Context, accountID, bucketName string) (string, error) {
 	body := map[string]string{"bucketName": bucketName}
+	if accountID != "" {
+		body["accountId"] = accountID
+	}
 	data, _ := json.Marshal(body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,

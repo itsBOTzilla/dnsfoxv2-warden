@@ -43,9 +43,33 @@ var malwarePatterns = []*regexp.Regexp{
 }
 
 // ScanSite scans a site directory for malware.
+// linuxUser is the OS username for v1-cgroup sites (e.g. "site_ed58d27bf42f");
+// leave empty to derive the path from siteID using the v2 convention.
 // Infected files are moved to /var/quarantine/site_{id}/{timestamp}/.
-func ScanSite(ctx context.Context, siteID string) (*ScanResult, error) {
-	siteDir := fmt.Sprintf("/var/www/site_%s", siteID)
+func ScanSite(ctx context.Context, siteID, linuxUser string) (*ScanResult, error) {
+	siteDir := ""
+
+	// Attempt 1: explicit linuxUser from payload.
+	if linuxUser != "" {
+		v1Dir := "/home/" + linuxUser + "/public_html"
+		if _, err := os.Stat(v1Dir); err == nil {
+			siteDir = v1Dir
+		}
+	}
+
+	// Attempt 2: derive v1 linux user from siteID (first 12 hex chars, no dashes).
+	if siteDir == "" {
+		derived := "site_" + deriveShortID(siteID)
+		v1Dir := "/home/" + derived + "/public_html"
+		if _, err := os.Stat(v1Dir); err == nil {
+			siteDir = v1Dir
+		}
+	}
+
+	// Attempt 3: v2-provisioner path.
+	if siteDir == "" {
+		siteDir = fmt.Sprintf("/var/www/site_%s", siteID)
+	}
 	if _, err := os.Stat(siteDir); err != nil {
 		return nil, fmt.Errorf("clamav: site dir not found: %s", siteDir)
 	}
@@ -180,4 +204,14 @@ func contains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// deriveShortID returns the first 12 hex chars of a UUID with dashes removed.
+// Matches the v1-cgroup Linux username convention: site_{12hexchars}.
+func deriveShortID(siteID string) string {
+	hex := strings.ReplaceAll(siteID, "-", "")
+	if len(hex) > 12 {
+		return hex[:12]
+	}
+	return hex
 }

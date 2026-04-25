@@ -25,6 +25,7 @@ func (e *Executor) handleBackupSite(ctx context.Context, payload map[string]inte
 ) {
 	siteID, _ := payload["site_id"].(string)
 	backupType, _ := payload["backup_type"].(string)
+	linuxUser, _ := payload["linux_user"].(string)
 	b2KeyID, _ := payload["b2_key_id"].(string)
 	b2AppKey, _ := payload["b2_app_key"].(string)
 	b2Bucket, _ := payload["b2_bucket"].(string)
@@ -50,7 +51,7 @@ func (e *Executor) handleBackupSite(ctx context.Context, payload map[string]inte
 		}
 	}
 
-	fileID, sizeBytes, err := backup.BackupSite(ctx, siteID, backupType, b2KeyID, b2AppKey, b2Bucket)
+	fileID, sizeBytes, err := backup.BackupSite(ctx, siteID, backupType, linuxUser, b2KeyID, b2AppKey, b2Bucket)
 	if err != nil {
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error()
 	}
@@ -241,12 +242,17 @@ func (e *Executor) handleUnsuspendSite(_ context.Context, payload map[string]int
 func (e *Executor) handleScanMalware(ctx context.Context, payload map[string]interface{}) (
 	wardenv1.ProvisioningStatus, string,
 ) {
+	// Accept both v2 ("site_id") and v1 ("instanceId") payload formats.
 	siteID, _ := payload["site_id"].(string)
+	if siteID == "" {
+		siteID, _ = payload["instanceId"].(string)
+	}
+	linuxUser, _ := payload["linux_user"].(string)
 	if siteID == "" {
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id"
 	}
 
-	result, err := clamav.ScanSite(ctx, siteID)
+	result, err := clamav.ScanSite(ctx, siteID, linuxUser)
 	if err != nil {
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error()
 	}

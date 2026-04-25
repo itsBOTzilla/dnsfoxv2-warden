@@ -193,18 +193,6 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 	case wardenv1.JobType_JOB_TYPE_MIGRATE_SITE:
 		return wrap2(e.handleMigrateSite(ctx, payload))
 
-	case wardenv1.JobType_JOB_TYPE_CONVERT_V1_TO_V2:
-		return wrap2(e.handleConvertV1ToV2(ctx, payload))
-
-	case wardenv1.JobType_JOB_TYPE_DOCKER_RESTART:
-		return wrap2(e.handleDockerRestart(ctx, payload))
-
-	case wardenv1.JobType_JOB_TYPE_DOCKER_STOP:
-		return wrap2(e.handleDockerStop(ctx, payload))
-
-	case wardenv1.JobType_JOB_TYPE_DOCKER_LOGS:
-		return wrap2(e.handleDockerLogs(ctx, payload))
-
 	case wardenv1.JobType_JOB_TYPE_SYNC_CLEANUP_SCRIPT,
 		wardenv1.JobType_JOB_TYPE_RUN_WP_CLI:
 		// These are handled by the heartbeat sync path or direct invocation.
