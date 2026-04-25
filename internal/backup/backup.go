@@ -124,6 +124,12 @@ func BackupSite(ctx context.Context, siteID, backupType, linuxUser, b2KeyID, b2A
 func backupFiles(ctx context.Context, b2 *b2Client, siteID, siteDir, ts, tmpDir string) (string, int64, error) {
 	archivePath := filepath.Join(tmpDir, fmt.Sprintf("site_%s_files_%s.tar.gz", siteID, ts))
 
+	// Resolve symlinks so filepath.Walk inside tarGzDir sees a real directory,
+	// not a dangling symlink entry (cgroup migration creates /home/site_X/public_html → /var/dnsfox/sites/…).
+	if resolved, err := filepath.EvalSymlinks(siteDir); err == nil {
+		siteDir = resolved
+	}
+
 	if err := tarGzDir(siteDir, archivePath); err != nil {
 		return "", 0, fmt.Errorf("backup: tar: %w", err)
 	}
@@ -223,7 +229,16 @@ func tarGzDir(srcDir, destPath string) error {
 		if err != nil {
 			return err
 		}
-		hdr, err := tar.FileInfoHeader(info, "")
+
+		// For symlinks, read the link target so the tar header is accurate.
+		var linkTarget string
+		if info.Mode()&os.ModeSymlink != 0 {
+			if linkTarget, err = os.Readlink(path); err != nil {
+				return err
+			}
+		}
+
+		hdr, err := tar.FileInfoHeader(info, linkTarget)
 		if err != nil {
 			return err
 		}
@@ -232,7 +247,8 @@ func tarGzDir(srcDir, destPath string) error {
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
-		if info.IsDir() {
+		// Directories and symlinks carry no file content in the archive.
+		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
 
