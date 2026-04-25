@@ -28,6 +28,7 @@ import (
 	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
 	wardenconnect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/archive"
+	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/cdncache"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/executor"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/filemgr"
@@ -232,6 +233,9 @@ func main() {
 	}
 	usageReporter := siteusage.NewReporter(apiClient, docrootBase)
 	go usageReporter.Run(ctx)
+
+	// Start nginx CDN cache log collector in background.
+	go cdncache.New(cfg.APIUrl, os.Getenv("WARDEN_AGENT_TOKEN")).Run(ctx)
 
 	// Register gRPC/Connect-Go handlers.
 	mux := http.NewServeMux()
