@@ -73,7 +73,9 @@ V1_SITES_AVAILABLE="/etc/nginx/sites-available"
 SYSTEMD_DIR="/etc/systemd/system"
 LOG_DIR="/var/log/dnsfox"
 
-PGPASSWORD="7PWomWQtP0bpSKyIdisotZFjZozw89qf"
+# PGPASSWORD must be supplied by the caller (not committed to git).
+# Example: PGPASSWORD=$(grep DATABASE_URL /home/ubuntu/dnsfox-platform/.env | grep -oP '(?<=:)[^@]+(?=@)')
+: "${PGPASSWORD:?Set PGPASSWORD before running this script (see /home/ubuntu/dnsfox-platform/.env)}"
 export PGPASSWORD
 DB_CONN="-h 127.0.0.1 -p 5432 -U dnsfox_user -d dnsfox"
 
@@ -295,6 +297,12 @@ NGINX
 log "DNSFox V1→V2 nginx vhost migration${DRY_RUN:+ (DRY RUN)}"
 log "Reading active instances from DB..."
 
+if [[ -n "$SINGLE_SITE" ]] && \
+   [[ ! "$SINGLE_SITE" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  echo "ERROR: --site must be a valid UUID (lowercase hex, e.g. a1b2c3d4-...)" >&2
+  exit 1
+fi
+
 QUERY="SELECT id, domain, subdomain FROM instances WHERE status NOT IN ('deleted','suspended')"
 if [[ -n "$SINGLE_SITE" ]]; then
   QUERY+=" AND id = '${SINGLE_SITE}'"
@@ -385,8 +393,10 @@ for row in "${ROWS[@]}"; do
   # ── Generate config ─────────────────────────────────────────────────────
 
   "$DRY_RUN" && verbose "Would write → $v2_conf" || true
-  mkdir -p "$LOG_DIR"
-  mkdir -p "$V2_CONF_DIR"
+  if ! "$DRY_RUN"; then
+    mkdir -p "$LOG_DIR"
+    mkdir -p "$V2_CONF_DIR"
+  fi
 
   if [[ "$site_type" == "nodejs" ]]; then
     conf_content=$(gen_nodejs_conf "$site_id" "$server_names" "$CERT_FILE" "$CERT_KEY" "$node_port")
