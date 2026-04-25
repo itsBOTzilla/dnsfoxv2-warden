@@ -209,6 +209,8 @@ func extractNodeParams(payload map[string]interface{}) nodejs.NodeParams {
 }
 
 // handlePurgeCache clears the nginx cache for the site specified in the payload.
+// When flush_redis is true it also deletes all Redis object-cache keys for the
+// site using SCAN+DEL against the V2 prefix "site_{siteID}:*".
 func (e *Executor) handlePurgeCache(_ context.Context, payload map[string]interface{}) (
 	wardenv1.ProvisioningStatus, string,
 ) {
@@ -216,13 +218,75 @@ func (e *Executor) handlePurgeCache(_ context.Context, payload map[string]interf
 	if siteID == "" {
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, "missing site_id"
 	}
+
 	url, _ := payload["url"].(string)
 	count, err := e.nginx.PurgeCache(siteID, url)
 	if err != nil {
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error()
 	}
-	log.Printf("[jobs] purged %d cache files for site %s", count, siteID)
+	log.Printf("[jobs] purged %d nginx cache files for site %s", count, siteID)
+
+	flushRedis, _ := payload["flush_redis"].(bool)
+	if flushRedis {
+		deleted, rerr := flushRedisSiteKeys(e.cfg.RedisHost, e.cfg.RedisPort, e.cfg.RedisPassword, siteID)
+		if rerr != nil {
+			// Redis flush failure is non-fatal — nginx cache is already clean.
+			log.Printf("[jobs] warn: redis flush site %s: %v", siteID, rerr)
+		} else {
+			log.Printf("[jobs] redis flush: deleted %d keys for site %s", deleted, siteID)
+		}
+	}
+
 	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, ""
+}
+
+// flushRedisSiteKeys deletes all Redis keys whose name begins with "site_{siteID}:"
+// using SCAN + DEL in batches. It never calls FLUSHALL or FLUSHDB.
+// Returns the total number of keys deleted.
+func flushRedisSiteKeys(host, port, password, siteID string) (int, error) {
+	prefix := "site_" + siteID + ":*"
+	addr := host + ":" + port
+
+	baseArgs := []string{"-h", host, "-p", port}
+	if password != "" {
+		baseArgs = append(baseArgs, "-a", password, "--no-auth-warning")
+	}
+
+	cursor := "0"
+	total := 0
+	for {
+		scanArgs := append(baseArgs, "SCAN", cursor, "MATCH", prefix, "COUNT", "200")
+		out, err := exec.Command("redis-cli", scanArgs...).Output()
+		if err != nil {
+			return total, fmt.Errorf("SCAN %s: %w", addr, err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) < 1 {
+			break
+		}
+		cursor = strings.TrimSpace(lines[0])
+		keys := lines[1:]
+
+		var toDelete []string
+		for _, k := range keys {
+			k = strings.TrimSpace(k)
+			if k != "" {
+				toDelete = append(toDelete, k)
+			}
+		}
+		if len(toDelete) > 0 {
+			delArgs := append(baseArgs, append([]string{"DEL"}, toDelete...)...)
+			if _, err := exec.Command("redis-cli", delArgs...).Output(); err != nil {
+				return total, fmt.Errorf("DEL batch: %w", err)
+			}
+			total += len(toDelete)
+		}
+
+		if cursor == "0" {
+			break
+		}
+	}
+	return total, nil
 }
 
 // handleSyncWafRules downloads the consolidated WAF rule file from the API and
