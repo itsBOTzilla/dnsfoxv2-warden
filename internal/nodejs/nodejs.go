@@ -14,6 +14,7 @@
 //  7. Run build command if provided
 //  8. Write and enable systemd service unit
 //  9. Write nginx reverse-proxy vhost
+//
 // 10. Start service and reload nginx
 package nodejs
 
@@ -133,7 +134,14 @@ func detectFramework(docroot string) DetectionResult {
 }
 
 // readPackageJSONScripts parses the "scripts" object from package.json in docroot.
+// Files larger than 512 KB are ignored — no real package.json needs to be that large,
+// and the file comes from a customer-controlled git repo.
 func readPackageJSONScripts(docroot string) map[string]string {
+	const maxSize = 512 * 1024
+	fi, err := os.Stat(filepath.Join(docroot, "package.json"))
+	if err != nil || fi.Size() > maxSize {
+		return nil
+	}
 	data, err := os.ReadFile(filepath.Join(docroot, "package.json"))
 	if err != nil {
 		return nil
@@ -294,14 +302,14 @@ func (p *Provisioner) DeprovisionNodeJS(ctx context.Context, siteID string) erro
 	username := provisioning.SiteUsername(siteID)
 	svcName := serviceUnit(siteID)
 
-	exec.Command("systemctl", "disable", "--now", svcName).Run()       //nolint:errcheck
-	os.Remove(fmt.Sprintf("/etc/systemd/system/%s", svcName))          //nolint:errcheck
-	exec.Command("systemctl", "daemon-reload").Run()                   //nolint:errcheck
-	p.nginx.RemoveVhost(siteID)                                         //nolint:errcheck
-	p.cgroups.RemoveLimits(siteID)                                      //nolint:errcheck
-	p.mariadb.DropSiteDatabase(siteID, username)                        //nolint:errcheck
-	exec.Command("userdel", "-r", username).Run()                       //nolint:errcheck
-	provisioning.ReloadNginx()                                           //nolint:errcheck
+	exec.Command("systemctl", "disable", "--now", svcName).Run() //nolint:errcheck
+	os.Remove(fmt.Sprintf("/etc/systemd/system/%s", svcName))    //nolint:errcheck
+	exec.Command("systemctl", "daemon-reload").Run()             //nolint:errcheck
+	p.nginx.RemoveVhost(siteID)                                  //nolint:errcheck
+	p.cgroups.RemoveLimits(siteID)                               //nolint:errcheck
+	p.mariadb.DropSiteDatabase(siteID, username)                 //nolint:errcheck
+	exec.Command("userdel", "-r", username).Run()                //nolint:errcheck
+	provisioning.ReloadNginx()                                   //nolint:errcheck
 
 	log.Printf("[nodejs] deprovisioning complete for %s", siteID)
 	return nil
@@ -451,7 +459,7 @@ func cloneRepo(ctx context.Context, repoURL, branch, docroot, username string) e
 		return fmt.Errorf("%w: %s", err, outStr)
 	}
 	// Strip .git to avoid credentials persisting in the volume.
-	os.RemoveAll(docroot + "/.git") //nolint:errcheck
+	os.RemoveAll(docroot + "/.git")                                   //nolint:errcheck
 	exec.Command("chown", "-R", username+":"+username, docroot).Run() //nolint:errcheck
 	return nil
 }

@@ -20,13 +20,13 @@ import (
 
 	"connectrpc.com/connect"
 
+	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
+	wardenv1connect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/config"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/migration"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/nodejs"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/provisioning"
 	"github.com/itsBOTzilla/dnsfoxv2-warden/internal/wordpress"
-	wardenv1 "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1"
-	wardenv1connect "github.com/itsBOTzilla/dnsfoxv2-proto/gen/go/warden/v1/wardenv1connect"
 )
 
 // Executor wraps the provisioner and dispatches async jobs.
@@ -161,7 +161,10 @@ func (e *Executor) runProvision(jobID string, cfg provisioning.SiteConfig, siteT
 		detectedFramework, err := e.jsProv.ProvisionNodeJS(ctx, cfg, params)
 		resultJSON := ""
 		if detectedFramework != "" {
-			resultJSON = `{"detected_framework":"` + detectedFramework + `"}`
+			b, _ := json.Marshal(struct {
+				DetectedFramework string `json:"detected_framework"`
+			}{DetectedFramework: detectedFramework})
+			resultJSON = string(b)
 		}
 		e.reportResult(jobID, err, resultJSON)
 		return
