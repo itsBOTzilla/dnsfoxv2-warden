@@ -193,6 +193,12 @@ func (e *Executor) executeJob(ctx context.Context, job *wardenv1.AgentJob) (
 	case wardenv1.JobType_JOB_TYPE_MIGRATE_SITE:
 		return wrap2(e.handleMigrateSite(ctx, payload))
 
+	case wardenv1.JobType_JOB_TYPE_CREATE_EDGE_VHOST:
+		return wrap2(e.handleCreateEdgeVhost(ctx, payload))
+
+	case wardenv1.JobType_JOB_TYPE_DELETE_EDGE_VHOST:
+		return wrap2(e.handleDeleteEdgeVhost(ctx, payload))
+
 	case wardenv1.JobType_JOB_TYPE_SYNC_CLEANUP_SCRIPT,
 		wardenv1.JobType_JOB_TYPE_RUN_WP_CLI:
 		// These are handled by the heartbeat sync path or direct invocation.

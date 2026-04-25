@@ -123,10 +123,17 @@ server {
 {{- end}}
     }
 
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-        expires 7d;
-        add_header Cache-Control "public, no-transform";
-        access_log off;
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|webp|avif|svg|woff|woff2|ttf|eot|mp4|webm)$ {
+        proxy_cache static_cache;
+        proxy_cache_valid 200 30d;
+        proxy_cache_key "$host$request_uri";
+        proxy_cache_use_stale error timeout updating;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        proxy_ignore_headers Cache-Control Set-Cookie;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Cache-Status $upstream_cache_status always;
+        access_log /var/log/nginx/cache-stats.log cache_stats;
     }
 
     # Cache purge — localhost only. Warden handles actual file removal via PurgeCache().
@@ -237,6 +244,25 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Strict-Transport-Security "max-age=31536000" always;
 
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|webp|avif|svg|woff|woff2|ttf|eot|mp4|webm)$ {
+        proxy_pass http://127.0.0.1:{{.Port}};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache static_cache;
+        proxy_cache_valid 200 30d;
+        proxy_cache_key "$host$request_uri";
+        proxy_cache_use_stale error timeout updating;
+        proxy_cache_background_update on;
+        proxy_cache_lock on;
+        proxy_ignore_headers Cache-Control Set-Cookie;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Cache-Status $upstream_cache_status always;
+        access_log /var/log/nginx/cache-stats.log cache_stats;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:{{.Port}};
         proxy_http_version 1.1;
@@ -307,4 +333,140 @@ func (m *Manager) PurgeCache(siteID, url string) (int32, error) {
 		}
 	}
 	return count, nil
+}
+
+// ─── CDN Edge Vhost ──────────────────────────────────────────────────────────
+
+// EdgeVhostConfig holds the configuration for a CDN edge reverse-proxy vhost.
+// The edge proxies all traffic to OriginIP, caching static assets for 30 days
+// and dynamic pages for 1 hour (with cookie-based bypass for logged-in users).
+type EdgeVhostConfig struct {
+	SiteID    string
+	Domain    string
+	OriginIP  string // IP of the origin server (the VPS hosting the actual site)
+	HasWWW    bool   // whether to also serve www.{Domain}
+}
+
+// edgeVhostPath returns the path for the edge vhost config.
+// Stored in sites-enabled so it can coexist with conf.d-v2/ origin configs.
+func edgeVhostPath(domain string) string {
+	return fmt.Sprintf("/etc/nginx/sites-enabled/%s", domain)
+}
+
+const edgeVhostTemplate = `# DNSFox CDN edge vhost for {{.Domain}} → origin {{.OriginIP}}
+# Managed by Warden — do not edit manually
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{.Domain}}{{if .HasWWW}} www.{{.Domain}}{{end}};
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name {{.Domain}}{{if .HasWWW}} www.{{.Domain}}{{end}};
+
+    ssl_certificate     /etc/ssl/dnsfox/{{.Domain}}/fullchain.pem;
+    ssl_certificate_key /etc/ssl/dnsfox/{{.Domain}}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL_EDGE:10m;
+
+    # Pass real client IP to origin.
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+
+    # Origin connection — our own server; skip cert verification.
+    proxy_ssl_verify     off;
+    proxy_ssl_server_name on;
+
+    # Cache bypass: skip for admin, checkout, POST, and session cookies.
+    set $skip_cache 0;
+    if ($request_method = POST)                                                { set $skip_cache 1; }
+    if ($request_uri ~* "^/(wp-admin|wp-login\.php|cart|checkout|my-account)") { set $skip_cache 1; }
+    if ($cookie_wordpress_logged_in)                                            { set $skip_cache 1; }
+    if ($cookie_woocommerce_cart_hash)                                          { set $skip_cache 1; }
+
+    # Static assets — 30-day edge cache, immutable.
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|webp|avif|svg|woff|woff2|ttf|eot|mp4|webm)$ {
+        proxy_pass https://{{.OriginIP}};
+        proxy_cache         static_cache;
+        proxy_cache_valid   200 30d;
+        proxy_cache_key     "$host$request_uri";
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock    on;
+        proxy_ignore_headers Cache-Control Set-Cookie;
+        proxy_cache_bypass  0;
+        proxy_no_cache      0;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Cache-Status $upstream_cache_status always;
+        add_header X-Edge-Server  $hostname always;
+        access_log /var/log/nginx/cache-stats.log cache_stats;
+    }
+
+    # Everything else — 1-hour edge cache with session bypass.
+    location / {
+        proxy_pass https://{{.OriginIP}};
+        proxy_cache         static_cache;
+        proxy_cache_valid   200 301 302 1h;
+        proxy_cache_valid   404 1m;
+        proxy_cache_key     "$host$request_uri";
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_cache_lock    on;
+        proxy_cache_bypass  $skip_cache;
+        proxy_no_cache      $skip_cache;
+        proxy_read_timeout  30;
+        proxy_connect_timeout 10;
+        add_header X-Cache-Status $upstream_cache_status always;
+        add_header X-Edge-Server  $hostname always;
+        access_log /var/log/nginx/cache-stats.log cache_stats;
+    }
+
+    location ~ /\. { deny all; }
+}
+`
+
+// WriteEdgeVhost writes a CDN edge reverse-proxy vhost config for a domain.
+// The SSL cert must already be installed at /etc/ssl/dnsfox/{domain}/.
+func (m *Manager) WriteEdgeVhost(cfg EdgeVhostConfig) error {
+	tmpl, err := template.New("edge-vhost").Parse(edgeVhostTemplate)
+	if err != nil {
+		return fmt.Errorf("edge vhost: parse template: %w", err)
+	}
+
+	path := edgeVhostPath(cfg.Domain)
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("edge vhost: create %s: %w", path, err)
+	}
+	defer f.Close()
+
+	if err := tmpl.Execute(f, cfg); err != nil {
+		return fmt.Errorf("edge vhost: render: %w", err)
+	}
+
+	if out, err := exec.Command("nginx", "-t").CombinedOutput(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("edge vhost: nginx -t failed: %s: %w", out, err)
+	}
+	return nil
+}
+
+// RemoveEdgeVhost deletes the CDN edge vhost config for a domain.
+func (m *Manager) RemoveEdgeVhost(domain string) error {
+	path := edgeVhostPath(domain)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("edge vhost: remove %s: %w", path, err)
+	}
+	return nil
 }
