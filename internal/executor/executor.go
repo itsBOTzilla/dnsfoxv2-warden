@@ -158,8 +158,12 @@ func (e *Executor) runProvision(jobID string, cfg provisioning.SiteConfig, siteT
 			params.StartCommand = ""
 			params.BuildCommand = ""
 		}
-		err := e.jsProv.ProvisionNodeJS(ctx, cfg, params)
-		e.reportResult(jobID, err, "")
+		detectedFramework, err := e.jsProv.ProvisionNodeJS(ctx, cfg, params)
+		resultJSON := ""
+		if detectedFramework != "" {
+			resultJSON = `{"detected_framework":"` + detectedFramework + `"}`
+		}
+		e.reportResult(jobID, err, resultJSON)
 		return
 	}
 

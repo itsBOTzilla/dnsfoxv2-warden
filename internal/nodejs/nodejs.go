@@ -20,6 +20,7 @@ package nodejs
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -73,6 +74,85 @@ type NodeParams struct {
 	IsStatic bool `json:"is_static"`
 }
 
+// DetectionResult holds the outcome of framework auto-detection.
+// Framework is empty when the user supplied their own start command
+// or when no recognisable framework was found.
+type DetectionResult struct {
+	Framework    string // "nextjs", "nuxt", "remix", or ""
+	StartCommand string // e.g. "node .next/standalone/server.js"
+	BuildCommand string // e.g. "npm run build"
+}
+
+// detectFramework inspects docroot for framework config files and package.json
+// scripts, returning detected start/build commands. The returned commands are
+// in "human" form (e.g. "node .next/standalone/server.js") — writeSystemdUnit
+// resolves them to absolute binary paths.
+func detectFramework(docroot string) DetectionResult {
+	// Priority 1: Next.js
+	for _, f := range []string{"next.config.js", "next.config.mjs", "next.config.ts"} {
+		if fileExists(filepath.Join(docroot, f)) {
+			return DetectionResult{
+				Framework:    "nextjs",
+				StartCommand: "node .next/standalone/server.js",
+				BuildCommand: "npm run build",
+			}
+		}
+	}
+	// Priority 2: Nuxt
+	for _, f := range []string{"nuxt.config.js", "nuxt.config.mjs", "nuxt.config.ts"} {
+		if fileExists(filepath.Join(docroot, f)) {
+			return DetectionResult{
+				Framework:    "nuxt",
+				StartCommand: "node .output/server/index.mjs",
+				BuildCommand: "npm run build",
+			}
+		}
+	}
+	// Priority 3: Remix
+	for _, f := range []string{"remix.config.js", "remix.config.mjs", "remix.config.ts"} {
+		if fileExists(filepath.Join(docroot, f)) {
+			return DetectionResult{
+				Framework:    "remix",
+				StartCommand: "npm run start",
+				BuildCommand: "npm run build",
+			}
+		}
+	}
+	// Fallback: use package.json scripts if present.
+	scripts := readPackageJSONScripts(docroot)
+	var startCmd, buildCmd string
+	if _, ok := scripts["start"]; ok {
+		startCmd = "npm run start"
+	} else {
+		startCmd = "server.js"
+	}
+	if _, ok := scripts["build"]; ok {
+		buildCmd = "npm run build"
+	}
+	return DetectionResult{StartCommand: startCmd, BuildCommand: buildCmd}
+}
+
+// readPackageJSONScripts parses the "scripts" object from package.json in docroot.
+func readPackageJSONScripts(docroot string) map[string]string {
+	data, err := os.ReadFile(filepath.Join(docroot, "package.json"))
+	if err != nil {
+		return nil
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return nil
+	}
+	return pkg.Scripts
+}
+
+// fileExists returns true if path exists on disk.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // Provisioner provisions Node.js sites on the host.
 type Provisioner struct {
 	cfg     *config.Config
@@ -93,22 +173,23 @@ func New(cfg *config.Config) *Provisioner {
 
 // ProvisionNodeJS sets up a complete Node.js hosting environment.
 // It does NOT call ProvisionSite — it manages its own user, docroot, and nginx.
-func (p *Provisioner) ProvisionNodeJS(ctx context.Context, siteCfg provisioning.SiteConfig, params NodeParams) error {
+// Returns the detected framework name (empty when user supplied their own command).
+func (p *Provisioner) ProvisionNodeJS(ctx context.Context, siteCfg provisioning.SiteConfig, params NodeParams) (string, error) {
 	if err := validateParams(params); err != nil {
-		return fmt.Errorf("invalid params: %w", err)
+		return "", fmt.Errorf("invalid params: %w", err)
 	}
 
 	username := provisioning.SiteUsername(siteCfg.SiteID)
 	docroot := fmt.Sprintf("/var/www/%s/public", username)
 
 	if err := provisioning.CreateSystemUser(username); err != nil {
-		return fmt.Errorf("create user: %w", err)
+		return "", fmt.Errorf("create user: %w", err)
 	}
 	if err := provisioning.AddToGroup(username, "www-data"); err != nil {
-		return fmt.Errorf("add www-data to group: %w", err)
+		return "", fmt.Errorf("add www-data to group: %w", err)
 	}
 	if err := provisioning.CreateDocumentRoot(docroot, username); err != nil {
-		return fmt.Errorf("create docroot: %w", err)
+		return "", fmt.Errorf("create docroot: %w", err)
 	}
 
 	limits, ok := provisioning.PlanLimits[siteCfg.Plan]
@@ -116,30 +197,31 @@ func (p *Provisioner) ProvisionNodeJS(ctx context.Context, siteCfg provisioning.
 		limits = provisioning.PlanLimits["fox"]
 	}
 	if err := p.cgroups.ApplyLimits(siteCfg.SiteID, username, limits); err != nil {
-		return fmt.Errorf("apply cgroup limits: %w", err)
+		return "", fmt.Errorf("apply cgroup limits: %w", err)
 	}
 
 	if params.DatabaseEnabled {
 		if err := p.mariadb.CreateSiteDatabase(siteCfg.SiteID, username); err != nil {
-			return fmt.Errorf("create database: %w", err)
+			return "", fmt.Errorf("create database: %w", err)
 		}
 		log.Printf("[nodejs] created mariadb database for %s", siteCfg.SiteID)
 	}
 
 	port, err := allocatePort(4000, 5000)
 	if err != nil {
-		return fmt.Errorf("allocate port: %w", err)
+		return "", fmt.Errorf("allocate port: %w", err)
 	}
 	log.Printf("[nodejs] allocated port %d for %s", port, siteCfg.Domain)
 
 	if err := p.writeEnvFile(username, siteCfg, params, port); err != nil {
-		return fmt.Errorf("write env file: %w", err)
+		return "", fmt.Errorf("write env file: %w", err)
 	}
 
+	var detectedFramework string
 	if !params.IsStatic {
 		if params.GitRepoURL != "" {
 			if err := cloneRepo(ctx, params.GitRepoURL, params.GitBranch, docroot, username); err != nil {
-				return fmt.Errorf("git clone: %w", err)
+				return "", fmt.Errorf("git clone: %w", err)
 			}
 		}
 
@@ -152,15 +234,31 @@ func (p *Provisioner) ProvisionNodeJS(ctx context.Context, siteCfg provisioning.
 			}
 		}
 
+		// Auto-detect framework and fill blank StartCommand / BuildCommand.
+		if params.StartCommand == "" || params.BuildCommand == "" {
+			det := detectFramework(docroot)
+			detectedFramework = det.Framework
+			if params.StartCommand == "" {
+				params.StartCommand = det.StartCommand
+			}
+			if params.BuildCommand == "" {
+				params.BuildCommand = det.BuildCommand
+			}
+			if det.Framework != "" {
+				log.Printf("[nodejs] detected framework %q for %s — start=%q build=%q",
+					det.Framework, siteCfg.SiteID, params.StartCommand, params.BuildCommand)
+			}
+		}
+
 		if params.BuildCommand != "" {
 			if err := runAsUser(username, docroot, params.BuildCommand); err != nil {
-				return fmt.Errorf("build command: %w", err)
+				return "", fmt.Errorf("build command: %w", err)
 			}
 		}
 	}
 
 	if err := p.writeSystemdUnit(siteCfg.SiteID, username, docroot, params, port); err != nil {
-		return fmt.Errorf("write systemd unit: %w", err)
+		return "", fmt.Errorf("write systemd unit: %w", err)
 	}
 
 	// Compute the internal subdomain alias (first 8 chars of site UUID).
@@ -176,7 +274,7 @@ func (p *Provisioner) ProvisionNodeJS(ctx context.Context, siteCfg provisioning.
 		Subdomain: subdomain,
 		Port:      port,
 	}); err != nil {
-		return fmt.Errorf("write nginx vhost: %w", err)
+		return "", fmt.Errorf("write nginx vhost: %w", err)
 	}
 
 	exec.Command("systemctl", "daemon-reload").Run() //nolint:errcheck
@@ -184,11 +282,11 @@ func (p *Provisioner) ProvisionNodeJS(ctx context.Context, siteCfg provisioning.
 	exec.Command("systemctl", "enable", "--now", svcName).Run() //nolint:errcheck
 
 	if err := provisioning.ReloadNginx(); err != nil {
-		return fmt.Errorf("reload nginx: %w", err)
+		return "", fmt.Errorf("reload nginx: %w", err)
 	}
 
 	log.Printf("[nodejs] provisioning complete for %s on port %d", siteCfg.Domain, port)
-	return nil
+	return detectedFramework, nil
 }
 
 // DeprovisionNodeJS tears down all resources for a Node.js site.
@@ -269,9 +367,25 @@ type unitData struct {
 	ExecStart string
 }
 
+// resolveExecStart converts a human-form start command into a systemd ExecStart
+// with an absolute binary path. Commands prefixed with "npm", "npx", or "node"
+// are resolved to their /usr/bin counterpart; bare script names are run via node.
+func resolveExecStart(startCmd string) string {
+	switch {
+	case strings.HasPrefix(startCmd, "npm "):
+		return "/usr/bin/npm " + strings.TrimPrefix(startCmd, "npm ")
+	case strings.HasPrefix(startCmd, "npx "):
+		return "/usr/bin/npx " + strings.TrimPrefix(startCmd, "npx ")
+	case strings.HasPrefix(startCmd, "node "):
+		return "/usr/bin/node " + strings.TrimPrefix(startCmd, "node ")
+	default:
+		return "/usr/bin/node " + startCmd
+	}
+}
+
 // writeSystemdUnit writes a systemd service unit for a Node.js app or static site.
-// For Node.js: ExecStart = /usr/bin/node <StartCommand>
 // For static (IsStatic=true): ExecStart = /usr/bin/serve public -s -p <port>
+// For Node.js: ExecStart resolved via resolveExecStart from StartCommand.
 func (p *Provisioner) writeSystemdUnit(siteID, username, docroot string, params NodeParams, port int) error {
 	var execStart string
 	if params.IsStatic {
@@ -281,7 +395,7 @@ func (p *Provisioner) writeSystemdUnit(siteID, username, docroot string, params 
 		if startCmd == "" {
 			startCmd = "server.js"
 		}
-		execStart = "/usr/bin/node " + startCmd
+		execStart = resolveExecStart(startCmd)
 	}
 
 	tmpl, err := template.New("unit").Parse(systemdUnitTemplate)

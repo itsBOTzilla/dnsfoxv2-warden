@@ -39,6 +39,12 @@ type jobProvisionResult struct {
 	AdminPassword string `json:"admin_password,omitempty"`
 }
 
+// nodeProvisionResult carries Node.js provisioning outputs, including the
+// auto-detected framework name so the API can store and display it.
+type nodeProvisionResult struct {
+	DetectedFramework string `json:"detected_framework,omitempty"`
+}
+
 // handleProvisionSite provisions a PHP or WordPress site from a heartbeat job.
 // Accepts both v2 ("instanceId") and legacy ("site_id") payload keys.
 func (e *Executor) handleProvisionSite(ctx context.Context, payload map[string]interface{}) (
@@ -139,12 +145,15 @@ func (e *Executor) handleProvisionNodeJS(ctx context.Context, payload map[string
 	log.Printf("[jobs] provision_nodejs job: site=%s domain=%s plan=%s", siteID, domain, plan)
 
 	params := extractNodeParams(payload)
-	if err := e.jsProv.ProvisionNodeJS(ctx, cfg, params); err != nil {
+	detectedFramework, err := e.jsProv.ProvisionNodeJS(ctx, cfg, params)
+	if err != nil {
 		return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_FAILED, err.Error(), ""
 	}
 
-	log.Printf("[jobs] provision_nodejs done: site=%s", siteID)
-	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, "", ""
+	res := nodeProvisionResult{DetectedFramework: detectedFramework}
+	b, _ := json.Marshal(res)
+	log.Printf("[jobs] provision_nodejs done: site=%s framework=%q", siteID, detectedFramework)
+	return wardenv1.ProvisioningStatus_PROVISIONING_STATUS_DONE, "", string(b)
 }
 
 // handleDeprovisionSite tears down a site from a heartbeat job.
