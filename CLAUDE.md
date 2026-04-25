@@ -1,6 +1,6 @@
 # DNSFox v2 Warden Agent — CLAUDE.md
 
-Go binary deployed to every server as `/usr/local/bin/warden`. Current version: **2.70.3**.
+Go binary deployed to every server as `/usr/local/bin/warden`. Current version: **2.70.6**.
 
 ## Hosting Model
 
