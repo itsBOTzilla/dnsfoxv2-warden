@@ -81,10 +81,10 @@ done
 [[ -z "$ACTION" ]]  && { echo "ERROR: --action is required";  usage; }
 
 # ── Redis CLI helper ──────────────────────────────────────────────────────────
+# Pass password via REDISCLI_AUTH so it does not appear in /proc/PID/cmdline or ps output.
+[[ -n "$REDIS_PASSWORD" ]] && export REDISCLI_AUTH="$REDIS_PASSWORD"
 rcli() {
-  local args=(-h "$REDIS_HOST" -p "$REDIS_PORT")
-  [[ -n "$REDIS_PASSWORD" ]] && args+=(-a "$REDIS_PASSWORD" --no-auth-warning)
-  redis-cli "${args[@]}" "$@"
+  redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" "$@"
 }
 
 # ── Actions ───────────────────────────────────────────────────────────────────
@@ -139,6 +139,7 @@ action_flush() {
     local result
     result=$(rcli SCAN "$cursor" MATCH "$pattern" COUNT 200)
     cursor=$(echo "$result" | head -1)
+    [[ -z "$cursor" ]] && { echo "ERROR: SCAN returned empty cursor"; exit 1; }
     mapfile -t keys < <(echo "$result" | tail -n +2 | grep -v '^$')
 
     if [[ ${#keys[@]} -gt 0 ]]; then

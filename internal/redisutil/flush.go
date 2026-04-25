@@ -3,6 +3,7 @@ package redisutil
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -14,17 +15,24 @@ func FlushSiteKeys(host, port, password, siteID string) (int, error) {
 	prefix := "site_" + siteID + ":*"
 	addr := host + ":" + port
 
+	// Pass the password via REDISCLI_AUTH so it does not appear in /proc/PID/cmdline or ps output.
 	baseArgs := []string{"-h", host, "-p", port}
+	env := os.Environ()
 	if password != "" {
-		baseArgs = append(baseArgs, "-a", password, "--no-auth-warning")
+		env = append(env, "REDISCLI_AUTH="+password)
+	}
+
+	runcmd := func(args []string) ([]byte, error) {
+		cmd := exec.Command("redis-cli", args...)
+		cmd.Env = env
+		return cmd.Output()
 	}
 
 	cursor := "0"
 	total := 0
 	for {
-		// Use a fresh slice each iteration to avoid aliasing the baseArgs backing array.
 		scanArgs := append(append([]string{}, baseArgs...), "SCAN", cursor, "MATCH", prefix, "COUNT", "200")
-		out, err := exec.Command("redis-cli", scanArgs...).Output()
+		out, err := runcmd(scanArgs)
 		if err != nil {
 			return total, fmt.Errorf("SCAN %s: %w", addr, err)
 		}
@@ -33,6 +41,9 @@ func FlushSiteKeys(host, port, password, siteID string) (int, error) {
 			break
 		}
 		cursor = strings.TrimSpace(lines[0])
+		if cursor == "" {
+			return total, fmt.Errorf("SCAN returned empty cursor at addr %s", addr)
+		}
 
 		var toDelete []string
 		for _, k := range lines[1:] {
@@ -43,7 +54,7 @@ func FlushSiteKeys(host, port, password, siteID string) (int, error) {
 		}
 		if len(toDelete) > 0 {
 			delArgs := append(append([]string{}, baseArgs...), append([]string{"DEL"}, toDelete...)...)
-			if _, err := exec.Command("redis-cli", delArgs...).Output(); err != nil {
+			if _, err := runcmd(delArgs); err != nil {
 				return total, fmt.Errorf("DEL batch: %w", err)
 			}
 			total += len(toDelete)
